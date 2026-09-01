@@ -9,3 +9,7 @@ data/
 config/secrets.toml
 *.pyc
 logs/
+.venv/
+*.egg-info/
+.env
+render/.env
