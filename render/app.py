@@ -296,20 +296,30 @@ async def receive_resend_webhook(request: Request) -> dict[str, Any]:
         attachments = await resend_get(client, f"/emails/receiving/{email_id}/attachments")
         page = await create_notion_page(client, email)
         notion = NotionHelper(required_setting("NOTION_TOKEN"), request_timeout=60)
+        notion_files = []
         for attachment in attachments.get("data", attachments.get("attachments", [])):
             temporary_path, filename = await download_attachment(client, attachment, email_id)
             try:
-                await asyncio.to_thread(
-                    notion.one_step_file_to_page_property,
-                    page["id"],
-                    "Attachments",
-                    temporary_path,
-                    filename,
+                upload = await asyncio.to_thread(notion.upload_file, temporary_path)
+                notion_files.append(
+                    {
+                        "type": "file_upload",
+                        "file_upload": {"id": str(upload["id"])},
+                        "name": filename,
+                    }
                 )
             finally:
                 try:
                     os.unlink(temporary_path)
                 except FileNotFoundError:
                     pass
+
+        if notion_files:
+            attachment_update = await client.patch(
+                f"{NOTION_API_BASE}/pages/{page['id']}",
+                headers=notion_headers(),
+                json={"properties": {"Attachments": {"files": notion_files}}},
+            )
+            attachment_update.raise_for_status()
 
     return {"status": "archived", "message_id": message_id, "notion_page_id": page["id"]}
