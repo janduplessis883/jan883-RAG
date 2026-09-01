@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import os
+import re
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -86,16 +87,38 @@ def unwrap_data(response: httpx.Response) -> dict[str, Any]:
 
 def clean_email_body(email: dict[str, Any]) -> str:
     text = (email.get("text") or "").strip()
-    if text:
-        return text
+    if not text:
+        raw_html = email.get("html") or ""
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for element in soup(["script", "style", "head"]):
+            element.decompose()
+        text = "\n".join(line.strip() for line in soup.get_text("\n").splitlines() if line.strip())
 
-    raw_html = email.get("html") or ""
-    soup = BeautifulSoup(raw_html, "html.parser")
-    for element in soup(["script", "style", "head"]):
-        element.decompose()
-    return "\n\n".join(
-        line.strip() for line in soup.get_text("\n").splitlines() if line.strip()
-    ).strip()
+    # NHS Mail appends Jan's fixed signature before the forwarded message.
+    # When the forwarded From header is present, retaining the message from
+    # that header onward is safer than hard-coding a signature name.
+    forwarded_from = re.search(r"(?im)^\s*From:\s*.+$", text)
+    if forwarded_from:
+        text = text[forwarded_from.start() :]
+
+    # Remove the recurring NHS Mail confidentiality notice from all archived
+    # messages so it does not become repetitive RAG context.
+    footer = re.search(
+        r"(?ims)^\s*(?:\*\*)?This message may contain confidential information\.",
+        text,
+    )
+    if footer:
+        text = text[: footer.start()]
+
+    text = re.sub(r"(?m)^\s*---\s*$", "", text)
+    return "\n\n".join(line.strip() for line in text.splitlines() if line.strip()).strip()
+
+
+def extract_original_sender(body: str, fallback: str) -> str:
+    """Prefer the original sender in a forwarded NHS Mail From header."""
+
+    match = re.search(r"(?im)^\s*From:\s*(.+?)\s*$", body)
+    return match.group(1).strip() if match else fallback
 
 
 def display_addresses(value: Any) -> str:
@@ -205,10 +228,10 @@ async def create_notion_page(
 ) -> dict[str, Any]:
     message_id = str(email.get("message_id") or email.get("email_id") or "")
     subject = str(email.get("subject") or "(no subject)")
-    sender = display_addresses(email.get("from"))
     recipients = display_addresses(email.get("to"))
     received_at = str(email.get("created_at") or datetime.now(timezone.utc).isoformat())
     body = clean_email_body(email)
+    sender = extract_original_sender(body, display_addresses(email.get("from")))
     content = [
         {
             "object": "block",
