@@ -110,6 +110,8 @@ def clean_email_body(email: dict[str, Any]) -> str:
     if footer:
         text = text[: footer.start()]
 
+    # NHS Mail may add a long row of asterisks as a trailing separator.
+    text = re.sub(r"(?m)^\s*\*{20,}\s*$", "", text)
     text = re.sub(r"(?m)^\s*---\s*$", "", text)
     return "\n\n".join(line.strip() for line in text.splitlines() if line.strip()).strip()
 
