@@ -1,0 +1,94 @@
+Metadata-Version: 2.4
+Name: personal-local-rag
+Version: 0.1.0
+Summary: Local-first personal RAG system with Streamlit, SQLite, Ollama, and Telegram ingestion.
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: beautifulsoup4>=4.12.3
+Requires-Dist: notionhelper>=0.6.4
+Requires-Dist: readability-lxml>=0.8.1
+Requires-Dist: requests>=2.32.3
+Requires-Dist: streamlit>=1.44.0
+Requires-Dist: pypdf>=4.2.0
+Requires-Dist: sqlite-vec>=0.1.6
+Requires-Dist: langfuse>=3.3.1
+Requires-Dist: loguru>=0.7.3
+Requires-Dist: rich>=14.0.0
+Requires-Dist: watchfiles>=1.1.0
+
+# Personal Local RAG
+
+Local-first Python RAG system for articles, PDFs, pasted text, and Telegram bot ingestion.
+
+## Features
+
+- Streamlit app for ingest, search, chat, config editing, and backups
+- Local Ollama embeddings with `nomic-embed-text:v1.5`
+- Selectable local answer models
+- SQLite storage with `sqlite-vec` support and a Python fallback path
+- Hybrid dense + SQLite FTS5/BM25 retrieval fused with Reciprocal Rank Fusion (`rrf_k = 60`)
+- Semantic chunking with configurable thresholds
+- Deduplication by normalized URL and content hash
+- Notion page and data-source ingestion via `notionhelper`
+- Telegram bot polling for links, forwarded messages, and PDF/document ingest
+- One-click timestamped backups to a separate partition
+- Read-only OneDrive folder watcher with Rich terminal output and Loguru logs
+
+## Quick Start
+
+1. Install dependencies into your existing `pyenv` environment:
+
+```bash
+pip install -e .
+```
+
+2. Review `config/settings.toml` and `config/secrets.toml`.
+   Add your Notion integration token under `[notion]` in `config/secrets.toml` if you want Notion ingestion.
+
+3. Start Ollama and ensure your local models are available:
+
+```bash
+ollama list
+```
+
+4. Launch the app:
+
+```bash
+make app
+```
+
+## Notes
+
+- Hybrid retrieval is enabled by default and can be disabled in the Chat sidebar with **Hybrid retrieval (FTS5 + dense)**, or via `retrieval.hybrid_enabled` in `config/settings.toml`.
+
+- `config/secrets.toml` is ignored by git and intended for local-only secrets.
+- Optional Langfuse tracing is enabled when `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`
+  are set in `.streamlit/secrets.toml` (or the shell environment). For the local Docker
+  instance, use `LANGFUSE_BASE_URL=http://localhost:3000`.
+  If Streamlit also runs inside Docker, use `http://host.docker.internal:3000` instead.
+  Content capture is disabled by default; set `langfuse.capture_content = true` only when
+  it is appropriate to send prompts and answers to your Langfuse instance.
+- Telegram ingestion is poll-based. You can trigger it from the Streamlit admin page or with `make sync-telegram`.
+- Backups are written into timestamped folders below the configured backup root.
+
+## OneDrive folder watcher
+
+Install the updated dependencies into the existing environment:
+
+```bash
+pip install -e .
+```
+
+Start watching a OneDrive folder (replace the path with the folder synced on your laptop):
+
+```bash
+make watch-folder FOLDER="/Users/your-name/OneDrive/Inbox"
+```
+
+Or run it directly:
+
+```bash
+python -m local_rag.folder_watcher "/Users/your-name/OneDrive/Inbox"
+```
+
+The watcher recursively reports added, modified, and deleted files in the terminal. It writes a rotating log to `logs/folder-watcher.log` by default. It only observes changes for now; it does not move, read, upload, or process files. Stop it with `Ctrl+C`.

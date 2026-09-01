@@ -1,0 +1,52 @@
+[app]
+workspace_dir = "."
+data_dir = "data"
+database_path = "data/rag.sqlite3"
+raw_files_dir = "data/raw"
+backup_root = "/Volumes/BackupHD/jan883-RAG-Backup/"
+
+[ollama]
+api_key = "12345"
+base_url = "http://127.0.0.1:8000/v1"
+embedding_model = "embeddinggemma-300m-4bit"
+answer_models = ["gemma-4-26b-a4b-it-4bit", "gpt-oss-20b-MXFP4-Q8"]
+default_answer_model = "gemma-4-26b-a4b-it-4bit"
+embedding_dimensions = 768
+request_timeout_seconds = 120
+embed_batch_size = 64
+
+[chunking]
+target_chars = 1200
+min_chars = 500
+max_chars = 1800
+hard_split_chars = 2200
+semantic_merge_threshold = 0.72
+fixed_chunk_size = 1200
+fixed_chunk_overlap = 200
+
+[retrieval]
+hybrid_enabled = true
+top_k = 8
+candidate_k = 24
+lexical_k = 24
+max_context_chunks = 8
+min_similarity = 0.20
+dedupe_by_source = true
+rrf_k = 60
+expand_radius = 1
+
+[langfuse]
+base_url = "http://localhost:3000"
+capture_content = false
+environment = "local"
+
+[telegram]
+enabled = true
+poll_limit = 25
+allowed_document_extensions = ["pdf", "txt", "md"]
+
+[notion]
+enabled = true
+request_timeout_seconds = 30
+data_source_preview_limit = 200
+max_child_page_depth = 3
