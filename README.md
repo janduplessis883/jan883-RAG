@@ -101,3 +101,29 @@ rm ~/Library/LaunchAgents/com.janduplessis.jan883-rag.folder-watcher.plist
 ```
 
 LaunchAgent stdout and stderr are written to `logs/folder-watcher.stdout.log` and `logs/folder-watcher.stderr.log`.
+
+## Local Notion-to-RAG sync
+
+The Notion email archive can be synced into the local RAG database every 10 minutes:
+
+```bash
+make sync-notion
+```
+
+The worker runs one sync immediately, then repeats every 10 minutes. It uses the
+Notion data source `f07c5456-62e7-4589-848d-d87fca9a483c`, ingests page text only,
+and skips pages already present in the local database. PDF and other attachments
+are deliberately not downloaded or ingested yet.
+After a page is successfully ingested, or is found to be already present locally,
+the worker sets its Notion `Ingested` checkbox to true.
+
+To run it automatically at login, install its LaunchAgent:
+
+```bash
+mkdir -p logs ~/Library/LaunchAgents
+cp launchd/com.janduplessis.jan883-rag.notion-sync.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.janduplessis.jan883-rag.notion-sync.plist
+```
+
+Its Loguru log is `logs/notion-sync.log`; LaunchAgent stdout and stderr are
+`logs/notion-sync.stdout.log` and `logs/notion-sync.stderr.log`.

@@ -161,6 +161,7 @@ class IngestionService:
                     results.append(
                         {
                             "status": "duplicate",
+                            "notion_page_id": self._normalize_notion_id(str(page_id)),
                             "source_id": int(existing["id"]),
                             "title": existing["title"],
                             "canonical_uri": existing["canonical_uri"],
@@ -186,6 +187,7 @@ class IngestionService:
                     raw_binary_name=None,
                     chunking=chunking,
                 )
+                result["notion_page_id"] = self._normalize_notion_id(str(page_id))
                 results.append(result)
                 if result["status"] == "duplicate":
                     duplicates += 1
