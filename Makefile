@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: app init stats sync-telegram backup reindex watch-folder format lint
+.PHONY: app init stats sync-telegram backup reindex watch-folder sync-notion format lint
 
 app:
 	streamlit run app.py
@@ -22,6 +22,9 @@ reindex:
 
 watch-folder:
 	$(PYTHON) -m watcher.folder_watcher
+
+sync-notion:
+	$(PYTHON) -m watcher.notion_sync
 
 format:
 	$(PYTHON) -m compileall app.py local_rag
