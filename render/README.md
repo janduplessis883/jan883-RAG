@@ -28,6 +28,6 @@ Required environment variables include:
 
 If the cleaned email body starts with `calendar` (case-insensitive), the
 service creates a page in the Calendar data source using the subject as the
-`Event` title and the body as page content. Calendar messages bypass duplicate
-checking and attachment processing. Other messages retain the existing Work
-Email Archive behavior.
+`Event` title, the current UTC time as the ISO 8601 `Date`, and the body as page
+content. Calendar messages bypass duplicate checking and attachment
+processing. Other messages retain the existing Work Email Archive behavior.

@@ -292,7 +292,10 @@ async def create_calendar_notion_page(
                 "type": "data_source_id",
                 "data_source_id": required_setting("NOTION_CALENDAR_DATA_SOURCE_ID"),
             },
-            "properties": {"Event": title_property(subject)},
+            "properties": {
+                "Event": title_property(subject),
+                "Date": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+            },
             "children": content[:100],
         },
     )

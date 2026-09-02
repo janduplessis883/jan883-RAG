@@ -199,10 +199,11 @@ The Render service should use the `render/` directory as its root directory. Its
 
 Emails whose cleaned body starts with the word `calendar` (case-insensitive) are
 routed to `NOTION_CALENDAR_DATA_SOURCE_ID`. The subject is stored in the
-Calendar data source's `Event` title property and the cleaned body becomes the
-page content. This route does not check duplicates and does not retrieve or
-upload attachments. All other emails continue through the Work Email Archive
-duplicate and attachment flow.
+Calendar data source's `Event` title property, the current UTC time is stored
+in its `Date` property as an ISO 8601 timestamp, and the cleaned body becomes
+the page content. This route does not check duplicates and does not retrieve
+or upload attachments. All other emails continue through the Work Email
+Archive duplicate and attachment flow.
 
 ### Webhook behavior
 
