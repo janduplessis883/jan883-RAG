@@ -26,7 +26,7 @@ Required environment variables include:
 - `NOTION_DATA_SOURCE_ID`
 - `NOTION_CALENDAR_DATA_SOURCE_ID`
 
-If the cleaned email body starts with `calendar` (case-insensitive), the
+If the email subject contains `calendar` (case-insensitive), the
 service creates a page in the Calendar data source using the subject as the
 `Event` title, the current UTC time as the ISO 8601 `Date`, and the body as page
 content. Calendar messages bypass duplicate checking and attachment

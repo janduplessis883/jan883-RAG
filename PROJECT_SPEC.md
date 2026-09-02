@@ -197,7 +197,7 @@ f07c5456-62e7-4589-848d-d87fca9a483c
 
 The Render service should use the `render/` directory as its root directory. Its container starts Uvicorn on Render's `$PORT`.
 
-Emails whose cleaned body starts with the word `calendar` (case-insensitive) are
+Emails whose subject contains the word `calendar` (case-insensitive) are
 routed to `NOTION_CALENDAR_DATA_SOURCE_ID`. The subject is stored in the
 Calendar data source's `Event` title property, the current UTC time is stored
 in its `Date` property as an ISO 8601 timestamp, and the cleaned body becomes

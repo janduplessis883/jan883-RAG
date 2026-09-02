@@ -167,10 +167,10 @@ def paragraph_blocks(text: str) -> list[dict[str, Any]]:
     return blocks
 
 
-def is_calendar_email(body: str) -> bool:
-    """Return whether the email body starts with the Calendar routing word."""
+def is_calendar_email(subject: str) -> bool:
+    """Return whether the subject contains the Calendar routing word."""
 
-    return bool(re.match(r"^\s*calendar\b", body, flags=re.IGNORECASE))
+    return bool(re.search(r"\bcalendar\b", subject, flags=re.IGNORECASE))
 
 
 async def resend_get(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
@@ -335,7 +335,7 @@ async def receive_resend_webhook(request: Request) -> dict[str, Any]:
         email = await resend_get(client, f"/emails/receiving/{email_id}")
         message_id = str(email.get("message_id") or email_id)
         body = clean_email_body(email)
-        if is_calendar_email(body):
+        if is_calendar_email(str(email.get("subject") or "")):
             page = await create_calendar_notion_page(client, email, body)
             return {
                 "status": "calendar_created",
