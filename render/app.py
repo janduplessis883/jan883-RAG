@@ -173,13 +173,6 @@ def is_calendar_email(subject: str) -> bool:
     return bool(re.search(r"\bcalendar\b", subject, flags=re.IGNORECASE))
 
 
-def calendar_event_title(subject: str) -> str:
-    """Remove the Calendar routing word and surrounding whitespace from a subject."""
-
-    cleaned = re.sub(r"\s*\bcalendar\b\s*", " ", subject, flags=re.IGNORECASE)
-    return re.sub(r"\s+", " ", cleaned).strip() or "(no subject)"
-
-
 async def resend_get(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
     response = await client.get(
         f"{RESEND_API_BASE}{path}",
@@ -289,7 +282,7 @@ async def create_calendar_notion_page(
 ) -> dict[str, Any]:
     """Create a minimal Calendar page without processing email attachments."""
 
-    subject = calendar_event_title(str(email.get("subject") or ""))
+    subject = str(email.get("subject") or "(no subject)")
     content = paragraph_blocks(body or "(empty body)")
     page = await client.post(
         f"{NOTION_API_BASE}/pages",
