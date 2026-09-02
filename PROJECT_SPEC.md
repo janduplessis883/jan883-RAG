@@ -12,7 +12,7 @@ This project is a local retrieval-augmented generation (RAG) system. It stores s
 
 The current automation scope is:
 
-1. Watch a OneDrive-synchronised folder for PDF and TXT files and ingest them automatically.
+1. Watch a OneDrive-synchronised folder for PDF, TXT, and Markdown files and ingest them automatically.
 2. Receive forwarded work emails through Resend on a Render-hosted webhook service.
 3. Clean and archive those emails as pages in a Notion database.
 4. Periodically sync the text of new Notion email pages into the local RAG database.
@@ -26,7 +26,7 @@ Implemented and working:
 - Local Streamlit RAG application.
 - Local SQLite database and vector/lexical search indexes.
 - Local Ollama embeddings.
-- PDF and TXT ingestion from the OneDrive folder watcher.
+- PDF, TXT, and Markdown ingestion from the OneDrive folder watcher.
 - Rich terminal output and rotating Loguru logs for the folder watcher.
 - macOS LaunchAgent for the folder watcher.
 - Render-hosted FastAPI email receiver.
@@ -118,12 +118,12 @@ Do not put API tokens, passwords, or private URLs in source files.
 /Users/janduplessis/Library/CloudStorage/OneDrive-NHS/INGESTION-FOLDER-jan883RAG
 ```
 
-It recursively observes filesystem changes. New or changed PDF and TXT files are passed to `IngestionService`. Unsupported files are reported and ignored.
+It recursively observes filesystem changes. New or changed PDF, TXT, and Markdown files are passed to `IngestionService`. Unsupported files are reported and ignored.
 
 Files ingested from this watcher receive the tags:
 
 - `onedrive`
-- the lower-case file extension, such as `pdf` or `txt`
+- the lower-case file extension, such as `pdf`, `txt`, or `md`
 
 ### Run manually
 
@@ -184,6 +184,7 @@ RESEND_API_KEY
 RESEND_WEBHOOK_SECRET
 NOTION_TOKEN
 NOTION_DATA_SOURCE_ID
+NOTION_CALENDAR_DATA_SOURCE_ID
 ```
 
 The values must be configured in Render's environment settings and must not be committed to GitHub.
@@ -195,6 +196,13 @@ f07c5456-62e7-4589-848d-d87fca9a483c
 ```
 
 The Render service should use the `render/` directory as its root directory. Its container starts Uvicorn on Render's `$PORT`.
+
+Emails whose cleaned body starts with the word `calendar` (case-insensitive) are
+routed to `NOTION_CALENDAR_DATA_SOURCE_ID`. The subject is stored in the
+Calendar data source's `Event` title property and the cleaned body becomes the
+page content. This route does not check duplicates and does not retrieve or
+upload attachments. All other emails continue through the Work Email Archive
+duplicate and attachment flow.
 
 ### Webhook behavior
 

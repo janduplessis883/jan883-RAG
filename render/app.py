@@ -167,6 +167,12 @@ def paragraph_blocks(text: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def is_calendar_email(body: str) -> bool:
+    """Return whether the email body starts with the Calendar routing word."""
+
+    return bool(re.match(r"^\s*calendar\b", body, flags=re.IGNORECASE))
+
+
 async def resend_get(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
     response = await client.get(
         f"{RESEND_API_BASE}{path}",
@@ -269,6 +275,41 @@ async def create_notion_page(
     return result
 
 
+async def create_calendar_notion_page(
+    client: httpx.AsyncClient,
+    email: dict[str, Any],
+    body: str,
+) -> dict[str, Any]:
+    """Create a minimal Calendar page without processing email attachments."""
+
+    subject = str(email.get("subject") or "(no subject)")
+    content = paragraph_blocks(body or "(empty body)")
+    page = await client.post(
+        f"{NOTION_API_BASE}/pages",
+        headers=notion_headers(),
+        json={
+            "parent": {
+                "type": "data_source_id",
+                "data_source_id": required_setting("NOTION_CALENDAR_DATA_SOURCE_ID"),
+            },
+            "properties": {"Event": title_property(subject)},
+            "children": content[:100],
+        },
+    )
+    page.raise_for_status()
+    result = page.json()
+    remaining = content[100:]
+    while remaining:
+        batch, remaining = remaining[:100], remaining[100:]
+        append = await client.patch(
+            f"{NOTION_API_BASE}/blocks/{result['id']}/children",
+            headers=notion_headers(),
+            json={"children": batch},
+        )
+        append.raise_for_status()
+    return result
+
+
 @app.get("/healthz")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
@@ -290,6 +331,15 @@ async def receive_resend_webhook(request: Request) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=60) as client:
         email = await resend_get(client, f"/emails/receiving/{email_id}")
         message_id = str(email.get("message_id") or email_id)
+        body = clean_email_body(email)
+        if is_calendar_email(body):
+            page = await create_calendar_notion_page(client, email, body)
+            return {
+                "status": "calendar_created",
+                "message_id": message_id,
+                "notion_page_id": page["id"],
+            }
+
         if await already_archived(client, message_id):
             return {"status": "duplicate", "message_id": message_id}
 

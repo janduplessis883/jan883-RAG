@@ -30,7 +30,7 @@ LOG_FILE = PROJECT_ROOT / "logs/folder-watcher.log"
 DEBOUNCE_MS = 1_600
 FILE_STABILITY_CHECKS = 3
 FILE_STABILITY_DELAY_SECONDS = 1.0
-SUPPORTED_EXTENSIONS = {".pdf", ".txt"}
+SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
 
 CHANGE_LABELS = {
     Change.added: ("ADDED", "green"),

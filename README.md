@@ -73,7 +73,7 @@ Or run it directly:
 python -m watcher.folder_watcher
 ```
 
-The scanning directory is defined by `SCANNING_DIRECTORY` in `watcher/folder_watcher.py`. The watcher recursively reports added, modified, and deleted files in the terminal. New or changed PDF and TXT files are automatically passed to the existing RAG ingestion service, embedded with the configured Ollama model, and stored in the SQLite database. Files are tagged with `onedrive` and their file type. It writes a rotating log to `logs/folder-watcher.log`; unsupported file types are reported and ignored. Stop it with `Ctrl+C`.
+The scanning directory is defined by `SCANNING_DIRECTORY` in `watcher/folder_watcher.py`. The watcher recursively reports added, modified, and deleted files in the terminal. New or changed PDF, TXT, and Markdown (`.md`) files are automatically passed to the existing RAG ingestion service, embedded with the configured Ollama model, and stored in the SQLite database. Files are tagged with `onedrive` and their file type. It writes a rotating log to `logs/folder-watcher.log`; unsupported file types are reported and ignored. Stop it with `Ctrl+C`.
 
 ### Run automatically in the background on macOS
 

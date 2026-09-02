@@ -17,3 +17,17 @@ Configure the Render service with this directory as its Root Directory:
 
 Copy the variables in `.env.example` into Render's environment settings. Do not
 commit a real `.env` file or any API keys.
+
+Required environment variables include:
+
+- `RESEND_API_KEY`
+- `RESEND_WEBHOOK_SECRET`
+- `NOTION_TOKEN`
+- `NOTION_DATA_SOURCE_ID`
+- `NOTION_CALENDAR_DATA_SOURCE_ID`
+
+If the cleaned email body starts with `calendar` (case-insensitive), the
+service creates a page in the Calendar data source using the subject as the
+`Event` title and the body as page content. Calendar messages bypass duplicate
+checking and attachment processing. Other messages retain the existing Work
+Email Archive behavior.
