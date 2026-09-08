@@ -22,6 +22,9 @@ from local_rag.telegram_sync import TelegramBotClient
 
 
 class IngestionService:
+    TAG_SUGGESTION_MAX_CHARS = 6000
+    TAG_SUGGESTION_MODEL = "gemma-4-26b-a4b-it-4bit"
+
     def __init__(self, config_manager, database) -> None:
         self.config_manager = config_manager
         self.database = database
@@ -42,7 +45,7 @@ class IngestionService:
             source_type="article",
             title=extracted["title"],
             text=extracted["text"],
-            tags=tags or [],
+            tags=tags,
             canonical_uri=extracted["canonical_uri"],
             external_ref=None,
             metadata=extracted["metadata"],
@@ -96,7 +99,7 @@ class IngestionService:
             source_type="notion_page",
             title=preview["title"],
             text=preview["text"],
-            tags=tags or [],
+            tags=tags,
             canonical_uri=preview["canonical_uri"],
             external_ref=page_url_or_id,
             metadata=preview["metadata"],
@@ -157,6 +160,19 @@ class IngestionService:
                 canonical_uri = f"notion://page/{self._normalize_notion_id(str(page_id))}"
                 existing = self.database.find_source_by_uri(canonical_uri)
                 if existing:
+                    existing_source = self.database.get_source(int(existing["id"]))
+                    existing_tags = list(existing_source.get("tags", [])) if existing_source else []
+                    if (
+                        tags is None
+                        and existing_source
+                        and set(existing_tags).issubset({"email", "work"})
+                    ):
+                        generated_tags = self.suggest_tags(
+                            title=existing_source["title"],
+                            text=existing_source.get("full_text", ""),
+                        )
+                        existing_tags = list(dict.fromkeys([*existing_tags, *generated_tags]))
+                        self.database.update_source_tags(int(existing["id"]), existing_tags)
                     duplicates += 1
                     results.append(
                         {
@@ -165,6 +181,7 @@ class IngestionService:
                             "source_id": int(existing["id"]),
                             "title": existing["title"],
                             "canonical_uri": existing["canonical_uri"],
+                            "tags": existing_tags,
                             "skipped_content_fetch": True,
                         }
                     )
@@ -178,7 +195,7 @@ class IngestionService:
                     source_type="notion_data_source_page",
                     title=page_preview["title"],
                     text=page_preview["text"],
-                    tags=tags or [],
+                    tags=tags,
                     canonical_uri=page_preview["canonical_uri"],
                     external_ref=f"notion://data-source/{preview['data_source_id']}",
                     metadata=merged_metadata,
@@ -227,7 +244,7 @@ class IngestionService:
             source_type=source_type,
             title=title,
             text=text,
-            tags=tags or [],
+            tags=tags,
             canonical_uri=canonical_uri,
             external_ref=external_ref,
             metadata=metadata or {},
@@ -261,7 +278,7 @@ class IngestionService:
             source_type=source_type,
             title=extracted["title"],
             text=extracted["text"],
-            tags=tags or [],
+            tags=tags,
             canonical_uri=canonical_uri,
             external_ref=external_ref,
             metadata=merged_metadata,
@@ -321,7 +338,7 @@ class IngestionService:
                 result = self.ingest_file(
                     filename=path.name,
                     content=content,
-                    tags=tags or [],
+                    tags=tags,
                     source_type="markdown_directory",
                     canonical_uri=path.as_uri(),
                     external_ref=str(directory_path),
@@ -403,7 +420,9 @@ class IngestionService:
         if updates:
             self.database.set_state("telegram_offset", str(next_offset))
 
-        return {"status": "ok", "processed": len(results), "items": results}
+        result = {"status": "ok", "processed": len(results), "items": results}
+        self.database.record_operation("sync:telegram", result)
+        return result
 
     def _process_telegram_message(self, message: dict, client: TelegramBotClient) -> list[dict]:
         results: list[dict] = []
@@ -626,7 +645,7 @@ class IngestionService:
         source_type: str,
         title: str,
         text: str,
-        tags: list[str],
+        tags: list[str] | None,
         canonical_uri: str | None,
         external_ref: str | None,
         metadata: dict,
@@ -648,6 +667,8 @@ class IngestionService:
                 "title": duplicate["title"],
                 "canonical_uri": duplicate["canonical_uri"],
             }
+
+        suggested_tags = tags if tags is not None else self.suggest_tags(title=title, text=clean_text)
 
         slug = sanitize_filename(title)[:80]
         source_dir = self.raw_dir / slug
@@ -719,7 +740,7 @@ class IngestionService:
             external_ref=external_ref,
             content_hash=content_hash,
             summary=clean_text[:280],
-            tags=tags,
+            tags=suggested_tags,
             metadata=stored_metadata,
             raw_text_path=str(raw_text_path),
             raw_binary_path=str(raw_binary_path) if raw_binary_path else None,
@@ -731,6 +752,66 @@ class IngestionService:
             "source_id": source_id,
             "title": title,
             "chunk_count": len(chunks),
-            "tags": tags,
+            "tags": suggested_tags,
             "canonical_uri": canonical_uri,
         }
+
+    def suggest_tags(self, *, title: str, text: str) -> list[str]:
+        """Suggest concise retrieval tags from the beginning of a document.
+
+        Tagging is deliberately best-effort: ingestion should still succeed if the
+        chat model is unavailable or returns malformed output.
+        """
+        model = self.TAG_SUGGESTION_MODEL
+
+        excerpt = text.strip()[: self.TAG_SUGGESTION_MAX_CHARS]
+        if not excerpt:
+            return []
+        system_prompt = (
+            "You create tags for a personal knowledge-base search index. "
+            "Suggest 3 to 8 specific, useful tags describing the subject, people, "
+            "project, organization, content type, or important themes. "
+            "Use short lowercase phrases with spaces, not hashtags. "
+            'Return JSON only in the form {"tags": ["tag one", "tag two"]}. '
+            "Do not explain your choices."
+        )
+        user_prompt = f"Title: {title}\n\nDocument beginning:\n{excerpt}"
+        try:
+            raw = self.ollama.chat(
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            match = re.search(r"\{.*?\}", raw, flags=re.DOTALL)
+            payload = json.loads(match.group(0) if match else raw)
+            candidates = payload.get("tags", [])
+            if not isinstance(candidates, list):
+                return []
+
+            normalized: list[str] = []
+            for candidate in candidates:
+                tag = re.sub(r"\s+", " ", str(candidate).strip().lower()).strip(" #-_")
+                if tag and tag not in normalized:
+                    normalized.append(tag)
+            return normalized[:8]
+        except Exception:  # noqa: BLE001 - tagging must not block ingestion
+            return []
+
+    def update_source(self, source_id: int, *, title: str, text: str, tags: list[str]) -> dict:
+        """Prepare embeddings before atomically replacing the searchable document."""
+        if not title.strip() or not text.strip():
+            raise ValueError("A title and document text are required.")
+        source = self.database.get_source(source_id)
+        if not source or source["deleted_at"]:
+            raise ValueError("This document is no longer in the library.")
+        settings = source["metadata"].get("chunking", {})
+        chunker = (FixedChunker(chunk_size=int(settings.get("chunk_size", 1200)),
+                                overlap=int(settings.get("overlap", 200)))
+                   if settings.get("strategy") == "fixed" else self.chunker)
+        chunks = chunker.chunk(text.strip(), self.ollama.embed_texts)
+        if not chunks:
+            raise ValueError("The document did not produce any searchable passages.")
+        embeddings = self.ollama.embed_texts([chunk.text for chunk in chunks])
+        self.database.update_document(source_id, title=title.strip(), text=text.strip(), tags=tags,
+                                      content_hash=sha256_text(text.strip()), chunks=chunks, embeddings=embeddings)
+        return {"status": "updated", "source_id": source_id, "title": title.strip(), "chunk_count": len(chunks)}

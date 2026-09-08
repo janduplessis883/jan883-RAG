@@ -32,10 +32,11 @@ def main() -> None:
 
     page = st.navigation(
         [
-            st.Page("app_pages/dashboard.py", title="Dashboard", icon=":material/dashboard:"),
+            st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", default=True),
+            st.Page("app_pages/library.py", title="Library", icon=":material/library_books:"),
             st.Page("app_pages/ingest.py", title="Ingest", icon=":material/download:"),
             st.Page("app_pages/search.py", title="Search", icon=":material/search:"),
-            st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:"),
+            st.Page("app_pages/dashboard.py", title="Health", icon=":material/monitor_heart:"),
             st.Page("app_pages/admin.py", title="Admin", icon=":material/settings:"),
         ],
         position="top",

@@ -121,6 +121,17 @@ class Database:
             """
         )
 
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(sources)")}
+        for name in ("deleted_at", "updated_at", "full_text"):
+            if name not in columns:
+                self.connection.execute(f"ALTER TABLE sources ADD COLUMN {name} TEXT")
+        self.connection.execute("""CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL, messages_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        self.connection.execute("""CREATE TABLE IF NOT EXISTS operation_runs (
+            id INTEGER PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+            details_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+
         if self.sqlite_vec:
             self.connection.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_index USING vec0(embedding float[{embedding_dimensions}])"
@@ -207,7 +218,9 @@ class Database:
         return f"{self._normalize_dates(title)}\n{text}" if title else text
 
     @synchronized
-    def replace_chunks(self, source_id: int, chunks: list, embeddings: list[list[float]]) -> None:
+    def replace_chunks(self, source_id: int, chunks: list, embeddings: list[list[float]], *, commit: bool = True) -> None:
+        if len(chunks) != len(embeddings):
+            raise ValueError("Every chunk must have an embedding.")
         source_row = self.connection.execute("SELECT title FROM sources WHERE id = ?", (source_id,)).fetchone()
         source_title = source_row["title"] if source_row else ""
         existing = self.connection.execute(
@@ -246,22 +259,24 @@ class Database:
                     (chunk_id, self._fts_index_text(source_title, chunk.text)),
                 )
 
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
     @synchronized
-    def search_candidates(self, query_embedding: list[float], limit: int) -> list[tuple[int, float]]:
-        if self.sqlite_vec:
+    def search_candidates(self, query_embedding: list[float], limit: int, source_ids: list[int] | None = None) -> list[tuple[int, float]]:
+        if self.sqlite_vec and source_ids is None:
             try:
                 rows = self.connection.execute(
                     "SELECT rowid, distance FROM chunk_index WHERE embedding MATCH ? AND k = ?",
-                    (self.sqlite_vec.serialize_float32(query_embedding), limit),
+                    (self.sqlite_vec.serialize_float32(query_embedding), limit + int(self.connection.execute("SELECT COUNT(*) FROM chunks JOIN sources ON sources.id = chunks.source_id WHERE sources.deleted_at IS NOT NULL").fetchone()[0])),
                 ).fetchall()
                 candidate_ids = [int(row["rowid"]) for row in rows]
                 return self._rerank_candidates(candidate_ids, query_embedding)
             except sqlite3.DatabaseError:
                 pass
 
-        rows = self.connection.execute("SELECT chunk_id, embedding FROM chunk_vectors").fetchall()
+        scope = "" if source_ids is None else " AND sources.id IN (" + ",".join("?" for _ in source_ids) + ")"
+        rows = self.connection.execute("SELECT chunk_id, embedding FROM chunk_vectors JOIN chunks ON chunks.id = chunk_id JOIN sources ON sources.id = chunks.source_id WHERE sources.deleted_at IS NULL" + scope, tuple(source_ids or [])).fetchall()
         scored = []
         for row in rows:
             embedding = self._unpack_embedding(row["embedding"])
@@ -275,7 +290,7 @@ class Database:
             return []
         placeholders = ",".join(["?"] * len(candidate_ids))
         rows = self.connection.execute(
-            f"SELECT chunk_id, embedding FROM chunk_vectors WHERE chunk_id IN ({placeholders})",
+            f"SELECT chunk_id, embedding FROM chunk_vectors JOIN chunks ON chunks.id = chunk_id JOIN sources ON sources.id = chunks.source_id WHERE sources.deleted_at IS NULL AND chunk_id IN ({placeholders})",
             tuple(candidate_ids),
         ).fetchall()
         scores = []
@@ -307,7 +322,7 @@ class Database:
         return " OR ".join(f'"{token}"' for token in tokens)
 
     @synchronized
-    def search_lexical(self, query: str, limit: int) -> list[tuple[int, float]]:
+    def search_lexical(self, query: str, limit: int, source_ids: list[int] | None = None) -> list[tuple[int, float]]:
         """BM25-ranked chunks for a free-text query via FTS5.
 
         Returns (chunk_id, score) ordered best-first; higher score is better
@@ -318,16 +333,17 @@ class Database:
         match = self._build_fts_match(query)
         if not match:
             return []
+        scope = "" if source_ids is None else " AND sources.id IN (" + ",".join("?" for _ in source_ids) + ")"
         try:
             rows = self.connection.execute(
-                """
-                SELECT rowid, bm25(chunk_fts) AS score
-                FROM chunk_fts
-                WHERE chunk_fts MATCH ?
+                f"""
+                SELECT chunk_fts.rowid, bm25(chunk_fts) AS score
+                FROM chunk_fts JOIN chunks ON chunks.id = chunk_fts.rowid JOIN sources ON sources.id = chunks.source_id
+                WHERE sources.deleted_at IS NULL AND chunk_fts MATCH ? {scope}
                 ORDER BY score
                 LIMIT ?
                 """,
-                (match, limit),
+                (match, *(source_ids or []), limit),
             ).fetchall()
         except sqlite3.DatabaseError:
             return []
@@ -390,7 +406,7 @@ class Database:
                 sources.created_at
             FROM chunks
             JOIN sources ON sources.id = chunks.source_id
-            WHERE chunks.id IN ({placeholders})
+            WHERE sources.deleted_at IS NULL AND chunks.id IN ({placeholders})
             """,
             tuple(chunk_ids),
         ).fetchall()
@@ -415,7 +431,7 @@ class Database:
     @synchronized
     def get_stats(self) -> dict[str, int]:
         stats = {
-            "source_count": int(self.connection.execute("SELECT COUNT(*) FROM sources").fetchone()[0]),
+            "source_count": int(self.connection.execute("SELECT COUNT(*) FROM sources WHERE deleted_at IS NULL").fetchone()[0]),
             "chunk_count": int(self.connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]),
             "embedding_count": int(self.connection.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]),
         }
@@ -426,7 +442,7 @@ class Database:
     @synchronized
     def list_sources(self, limit: int = 20) -> list[dict]:
         rows = self.connection.execute(
-            "SELECT * FROM sources ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM sources WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [
@@ -542,3 +558,100 @@ class Database:
         values = array("f")
         values.frombytes(raw)
         return list(values)
+
+    @synchronized
+    def library_sources(self, *, removed: bool = False) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT id, title, source_type, tags_json, created_at, updated_at, canonical_uri "
+            "FROM sources WHERE deleted_at IS " + ("NOT NULL" if removed else "NULL") +
+            " ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+        return [{**dict(row), "tags": json.loads(row["tags_json"])} for row in rows]
+
+    @synchronized
+    def get_source(self, source_id: int) -> dict | None:
+        row = self.connection.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if row is None:
+            return None
+        source = dict(row)
+        source["tags"] = json.loads(source["tags_json"])
+        source["metadata"] = json.loads(source["metadata_json"])
+        text = source["full_text"]
+        if text is None and source["raw_text_path"]:
+            try:
+                text = Path(source["raw_text_path"]).read_text(encoding="utf-8")
+            except OSError:
+                pass
+        if text is None:
+            text = "\n\n".join(r[0] for r in self.connection.execute(
+                "SELECT text FROM chunks WHERE source_id = ? ORDER BY chunk_index", (source_id,)))
+        source["full_text"] = text
+        return source
+
+    @synchronized
+    def set_source_removed(self, source_id: int, removed: bool) -> None:
+        with self.connection:
+            self.connection.execute("UPDATE sources SET deleted_at = " +
+                                    ("CURRENT_TIMESTAMP" if removed else "NULL") + " WHERE id = ?", (source_id,))
+
+    @synchronized
+    def update_document(self, source_id: int, *, title: str, text: str, tags: list[str],
+                        content_hash: str, chunks: list, embeddings: list) -> None:
+        with self.connection:
+            row = self.connection.execute("SELECT id FROM sources WHERE id = ? AND deleted_at IS NULL", (source_id,)).fetchone()
+            if row is None:
+                raise ValueError("This document is no longer in the library.")
+            # Delete old FTS entries while the original title is still available.
+            self.replace_chunks(source_id, [], [], commit=False)
+            self.connection.execute(
+                "UPDATE sources SET title=?, full_text=?, tags_json=?, content_hash=?, summary=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (title, text, json.dumps(tags), content_hash, text[:280], source_id))
+            self.replace_chunks(source_id, chunks, embeddings, commit=False)
+
+    @synchronized
+    def update_source_tags(self, source_id: int, tags: list[str]) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE sources SET tags_json=?, updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND deleted_at IS NULL",
+                (json.dumps(tags), source_id),
+            )
+
+    @synchronized
+    def save_conversation(self, conversation_id: str, messages: list[dict]) -> None:
+        title = next((m["content"][:80] for m in messages if m["role"] == "user"), "New conversation")
+        with self.connection:
+            self.connection.execute("""INSERT INTO conversations(id, title, messages_json) VALUES(?,?,?)
+                ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages_json=excluded.messages_json,
+                updated_at=CURRENT_TIMESTAMP""", (conversation_id, title, json.dumps(messages)))
+
+    @synchronized
+    def list_conversations(self) -> list[dict]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC, rowid DESC")]
+
+    @synchronized
+    def load_conversation(self, conversation_id: str) -> list[dict]:
+        row = self.connection.execute("SELECT messages_json FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+        return json.loads(row[0]) if row else []
+
+    @synchronized
+    def record_operation(self, kind: str, result: dict) -> None:
+        failed = result.get("status") == "error" or bool(result.get("errors")) or any(
+            item.get("status") == "error" for item in result.get("items", []))
+        status = "error" if failed else result.get("status", "ok")
+        with self.connection:
+            self.connection.execute("INSERT INTO operation_runs(kind,status,details_json) VALUES(?,?,?)",
+                                    (kind, status, json.dumps(result, default=str)))
+
+    @synchronized
+    def operation_history(self, limit: int = 50) -> list[dict]:
+        return [{**dict(row), "details": json.loads(row["details_json"])} for row in self.connection.execute(
+            "SELECT * FROM operation_runs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    @synchronized
+    def last_successful_operation(self, kind: str) -> dict | None:
+        row = self.connection.execute(
+            "SELECT created_at, details_json FROM operation_runs WHERE kind=? AND status IN ('ok','ingested','duplicate') ORDER BY id DESC LIMIT 1",
+            (kind,)).fetchone()
+        return {"created_at": row[0], "details": json.loads(row[1])} if row else None

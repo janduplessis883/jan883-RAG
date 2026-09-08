@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import re
-
 import streamlit as st
-
+from local_rag.embeddings import OllamaClient
 
 PREFILLED_MARKDOWN_DIRECTORIES = [
     "/Users/janduplessis/Documents/notion_partner_meeting_md_files",
@@ -16,68 +15,79 @@ def runtime():
 
 
 def source_link(canonical_uri: str) -> str:
-    """Return a browser-friendly URL for a stored source identifier."""
-    notion_match = re.fullmatch(r"notion://page/([0-9a-fA-F-]+)", canonical_uri)
-    if notion_match:
-        notion_id = notion_match.group(1).replace("-", "")
-        return f"https://app.notion.com/p/{notion_id}?source=copy_link"
-    return canonical_uri
+    match = re.fullmatch(r"notion://page/([0-9a-fA-F-]+)", canonical_uri)
+    return f"https://app.notion.com/p/{match.group(1).replace('-', '')}?source=copy_link" if match else canonical_uri
 
 
-def render_runtime_sidebar() -> None:
+def render_runtime_details():
     config, _, _, _, _, _ = runtime()
     merged = config.load_merged()
-    with st.sidebar:
-        st.header("Runtime")
-        st.write(f"Database: `{merged['app']['database_path']}`")
-        st.write(f"Embedding model: `{merged['ollama']['embedding_model']}`")
-        st.write(f"Default answer model: `{merged['ollama']['default_answer_model']}`")
-        if st.button("Refresh app state", icon=":material/refresh:"):
-            st.session_state.pop("runtime", None)
-            st.rerun()
+    st.caption(f"Database: {merged['app']['database_path']}")
+    st.caption(f"Embedding model: {merged['ollama']['embedding_model']}")
+    st.caption(f"Default answer model: {merged['ollama']['default_answer_model']}")
+    if st.button("Refresh app state", icon=":material/refresh:"):
+        st.session_state.pop("runtime", None)
+        st.rerun()
 
 
-def render_search_results(results: list[dict]) -> None:
+def render_runtime_sidebar():
+    with st.sidebar.expander("Advanced settings", icon=":material/tune:"):
+        render_runtime_details()
+
+
+@st.cache_data(ttl=30, max_entries=8, show_spinner=False)
+def model_health(settings):
+    try:
+        client = OllamaClient({**settings, "request_timeout_seconds": 3})
+        return {"available": True, "models": client.list_models()}
+    except Exception:
+        return {"available": False, "models": []}
+
+
+def get_answer_models(chat, configured_models, default_model):
+    health = model_health(chat.config["ollama"])
+    return list(dict.fromkeys(health["models"] or [default_model, *configured_models]))
+
+
+def render_source_content(item, *, markdown=False):
+    st.caption(f"{item['source_type']} · Passage {item.get('chunk_index', 0) + 1}")
+    uri = item.get("canonical_uri")
+    if uri and source_link(uri).startswith(("https://", "http://")):
+        st.link_button("Open original", source_link(uri), icon=":material/open_in_new:")
+    text = item.get("text", item.get("preview", ""))
+    if markdown:
+        st.markdown(text)
+    else:
+        st.text(text)
+    if item.get("tags"):
+        st.caption("Tags: " + ", ".join(item["tags"]))
+
+
+def render_search_results(results):
     if not results:
-        st.info("No results found yet.")
+        st.info("No matching passages. Try a broader question or fewer filters.")
         return
-
-    for index, item in enumerate(results, start=1):
+    for index, item in enumerate(results, 1):
         with st.container(border=True):
-            st.subheader(f"{index}. {item['title']}")
-            score_bits = [f"RRF score: {item['rrf_score']:.4f}"]
-            if item.get("similarity") is not None:
-                score_bits.append(f"Similarity: {item['similarity']:.3f}")
-            else:
-                score_bits.append("Exact/lexical match")
-            st.caption(
-                f"{' | '.join(score_bits)} | Source type: {item['source_type']} | "
-                f"Chunk {item['chunk_index'] + 1} | Citation: [S{index}]"
-            )
-            if item["canonical_uri"]:
-                st.markdown(f"[Open source]({source_link(item['canonical_uri'])})")
-            st.write(item["preview"])
-            if item["tags"]:
-                st.caption(f"Tags: {', '.join(item['tags'])}")
+            st.subheader(item["title"])
+            st.caption(f"[S{index}] · {item['source_type']}")
+            st.write(item.get("preview", item.get("text", "")[:800]))
+            with st.expander("Read full supporting passage", icon=":material/menu_book:"):
+                render_source_content(item)
+            with st.expander("Retrieval diagnostics"):
+                st.caption(f"Ranking score: {item.get('rrf_score', 0):.4f} · Similarity: {item.get('similarity')}")
+                st.caption("Diagnostic ranking values, not confidence percentages.")
 
 
-def render_chat_sources(sources: list[dict]) -> None:
+def render_chat_sources(sources):
     if not sources:
         return
-    with st.expander("Sources", expanded=False, icon=":material/source:"):
-        render_search_results(sources)
-
-
-def get_answer_models(chat, configured_models: list[str], default_model: str) -> list[str]:
-    try:
-        models = chat.ollama.list_models()
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not load current Ollama models; using configured list. {exc}")
-        models = configured_models
-
-    if not models and default_model:
-        models = [default_model, *models]
-    return list(dict.fromkeys(models))
+    st.caption("Verify an answer: open the matching citation below. Passages are saved with this conversation.")
+    with st.container(horizontal=True):
+        for index, item in enumerate(sources, 1):
+            with st.popover(f"[S{index}] {item['title'][:45]}"):
+                st.markdown(f"**{item['title']}**")
+                render_source_content(item, markdown=True)
 
 
 def render_chunking_controls(key_prefix: str, config: dict) -> dict:

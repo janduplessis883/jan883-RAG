@@ -1,141 +1,123 @@
-import streamlit as st
 from uuid import uuid4
+import streamlit as st
 
-from app_pages.common import get_answer_models, render_chat_sources, render_runtime_sidebar, runtime
+from app_pages.common import get_answer_models, render_chat_sources, render_runtime_details, runtime
+from local_rag.presentation import export_conversation
 
-
-_, _, _, _, chat, _ = runtime()
+_, database, _, _, chat, _ = runtime()
 merged = chat.config
-
-st.title("Chat")
-st.caption("Ask questions about your local knowledge base.")
-
-answer_models = get_answer_models(
-    chat,
-    configured_models=merged["ollama"]["answer_models"],
-    default_model=merged["ollama"]["default_answer_model"],
-)
+st.title("Ask your knowledge base")
+st.caption("Answers grounded in your documents, with passages you can verify.")
 st.session_state.setdefault("chat_messages", [])
-chat_sidebar = st.sidebar.container()
-with chat_sidebar:
-
-    st.title(":material/chat: Chat")
-    if st.button("New chat", icon=":material/add_comment:", width="stretch"):
+st.session_state.setdefault("chat_session_id", str(uuid4()))
+if pending := st.session_state.pop("pending_conversation", None):
+    st.session_state["conversation_picker"] = pending
+with st.sidebar:
+    if st.button("New conversation", icon=":material/add_comment:", width="stretch"):
         st.session_state["chat_messages"] = []
-        st.rerun()
-    st.space(20)
-    selected_model = st.selectbox(
-        "Answer model",
-        answer_models,
-        index=answer_models.index(merged["ollama"]["default_answer_model"])
-        if merged["ollama"]["default_answer_model"] in answer_models
-        else 0,
-        key="chat_answer_model",
-    )
-    source_limit = st.slider(
-        "Sources to reference",
-        min_value=1,
-        max_value=20,
-        value=8,
-        step=1,
-        key="chat_source_limit",
-        help="Number of relevant knowledge-base chunks to retrieve for each question.",
-    )
-    multi_query_enabled = st.toggle(
-        "Multi-Query RAG",
-        value=True,
-        key="chat_multi_query_enabled",
-        help="Generate three related searches with the default model before retrieving context.",
-    )
-    hybrid_retrieval_enabled = st.toggle(
-        "Hybrid retrieval (FTS5 + dense)",
-        value=bool(merged["retrieval"].get("hybrid_enabled", True)),
-        key="chat_hybrid_retrieval_enabled",
-        help="Combine exact lexical matches with dense semantic search using Reciprocal Rank Fusion. Disable to use dense embeddings only.",
-    )
+        st.session_state["chat_session_id"] = str(uuid4())
+        st.session_state["conversation_picker"] = None
+    conversations = database.list_conversations()
+    titles = {row["id"]: row["title"] for row in conversations}
+    options = [None, *titles]
+    st.session_state.setdefault("conversation_picker", None)
+    if st.session_state["conversation_picker"] not in options:
+        st.session_state["conversation_picker"] = None
+    selected = st.selectbox("Conversation history", options, key="conversation_picker",
+                            format_func=lambda cid: "New conversation" if cid is None else titles[cid])
+    if selected and selected != st.session_state["chat_session_id"]:
+        st.session_state["chat_messages"] = database.load_conversation(selected)
+        st.session_state["chat_session_id"] = selected
+    with st.expander("Advanced settings", icon=":material/tune:"):
+        models = get_answer_models(chat, merged["ollama"]["answer_models"], merged["ollama"]["default_answer_model"])
+        selected_model = st.selectbox("Answer model", models,
+            index=models.index(merged["ollama"]["default_answer_model"]) if merged["ollama"]["default_answer_model"] in models else 0)
+        source_limit = st.slider("Passages to reference", 1, 20, 8)
+        multi_query = st.toggle("Multi-query retrieval", value=True,
+                               help="Explore related wording before retrieving passages. Adds a model call.")
+        hybrid = st.toggle("Hybrid retrieval", value=bool(merged["retrieval"].get("hybrid_enabled", True)),
+                           help="Combine keyword and semantic matches.")
+        render_runtime_details()
 
-st.sidebar.divider()
-render_runtime_sidebar()
-for message in st.session_state["chat_messages"]:
+messages = st.session_state["chat_messages"]
+if messages:
+    st.download_button("Export conversation", export_conversation(messages),
+                       file_name=f"conversation-{st.session_state['chat_session_id'][:8]}.md", mime="text/markdown")
+for message in messages:
     role = message["role"]
     avatar = ":material/auto_awesome:" if role == "assistant" else ":material/person:"
     with st.chat_message(role, avatar=avatar):
         st.markdown(message["content"])
-        if message.get("sources"):
-            render_chat_sources(message["sources"])
+        if message.get("error"):
+            st.warning("This answer was interrupted. Retry below to generate it again.")
+        render_chat_sources(message.get("sources", []))
 
-if not st.session_state["chat_messages"]:
-    st.info("Ask a question about the documents in your knowledge base.")
-
-if prompt := st.chat_input("Ask your knowledge base"):
-    previous_messages = list(st.session_state["chat_messages"])
-    st.session_state["chat_messages"].append({"role": "user", "content": prompt})
+example = None
+if not messages:
+    st.subheader("Start with a question")
+    for question in (
+        "What decisions were made in the meeting notes?",
+        "Which documents mention outstanding action items?",
+        "What do my documents say about project planning?",
+    ):
+        if st.button(question, icon=":material/arrow_forward:"):
+            example = question
+    if database.get_stats()["source_count"] == 0:
+        st.info("Your library is empty. Add a document on the Ingest page to get started.")
+retry = False
+if messages and (messages[-1].get("error") or messages[-1]["role"] == "user"):
+    retry = st.button("Retry last question", icon=":material/refresh:")
+prompt = st.chat_input("Ask about your documents") or example
+if retry:
+    if messages[-1].get("error"):
+        messages.pop()
+    prompt = messages.pop()["content"]
+if prompt:
+    previous = [m for m in messages if not m.get("error")]
+    messages.append({"role": "user", "content": prompt})
+    database.save_conversation(st.session_state["chat_session_id"], messages)
     with st.chat_message("user", avatar=":material/person:"):
         st.markdown(prompt)
-
-    related_questions = []
-    streamed_answer = ""
-    assistant_message = st.chat_message("assistant", avatar=":material/auto_awesome:")
-    answer_placeholder = assistant_message.empty()
-    session_id = st.session_state.setdefault("chat_session_id", str(uuid4()))
-    with chat.langfuse.trace(
-        "chat-response",
-        session_id=session_id,
-        input_data={"question": prompt, "model": selected_model},
-        tags=["streamlit", "rag-chat"],
-    ):
-        with chat_sidebar.status("Processing question...", expanded=True) as progress_status:
-            progress_status.write("Step 1/4: Preparing search questions...")
-            if multi_query_enabled:
-                related_questions = chat.generate_related_questions(prompt)
-                progress_status.write("Generated search variations:")
-                for related_question in related_questions:
-                    progress_status.write(f"- {related_question}")
-            else:
-                progress_status.write("Related-question expansion is disabled; using the original question.")
-
-            progress_status.write("Step 2/4: Retrieving knowledge-base context...")
-            if hybrid_retrieval_enabled:
-                progress_status.write("2a. Searching dense embeddings for semantic matches...")
-                progress_status.write("2b. Searching SQLite FTS5/BM25 for exact names, dates, and identifiers...")
-                progress_status.write("2c. Fusing dense and lexical rankings with Reciprocal Rank Fusion (k=60)...")
-            else:
-                progress_status.write("Dense-only mode enabled; skipping SQLite FTS5/BM25 retrieval.")
-            sources = chat.retrieve_sources(
-                question=prompt,
-                related_questions=related_questions,
-                source_limit=source_limit,
-                hybrid=hybrid_retrieval_enabled,
-            )
-            progress_status.write(f"Retrieved {len(sources)} source(s).")
-            progress_status.write("Step 3/4: Preparing retrieved context...")
-            progress_status.write("Step 4/4: Generating final answer...")
-            for text_delta in chat.answer_stream(
-                question=prompt,
-                model_name=selected_model,
-                history=previous_messages,
-                source_limit=source_limit,
-                related_questions=related_questions,
-                sources=sources,
-            ):
-                streamed_answer += text_delta
-                answer_placeholder.markdown(streamed_answer)
-            progress_status.write("Final answer generated.")
-            progress_status.update(
-                label="Question answered", state="complete", expanded=False
-            )
-
-    if sources:
-        with assistant_message:
-            render_chat_sources(sources)
-
-    st.session_state["chat_messages"].append(
-        {
-            "role": "assistant",
-            "content": streamed_answer,
-            "sources": sources,
-        }
-    )
-    chat.langfuse.flush()
-    if chat.langfuse.last_trace_url:
-        st.caption(f"Langfuse trace: {chat.langfuse.last_trace_url}")
+    sources = []
+    answer = ""
+    failure = False
+    with st.chat_message("assistant", avatar=":material/auto_awesome:"):
+        answer_slot = st.empty()
+        try:
+            with chat.langfuse.trace("chat-response", session_id=st.session_state["chat_session_id"],
+                                     input_data={"question": prompt, "model": selected_model}, tags=["streamlit", "rag-chat"]):
+                with st.status("Finding supporting passages...", expanded=False) as status:
+                    related = []
+                    if multi_query:
+                        try:
+                            related = chat.generate_related_questions(prompt)
+                        except Exception:
+                            status.write("Search expansion unavailable; using your original question.")
+                    sources = chat.retrieve_sources(prompt, related_questions=related, source_limit=source_limit, hybrid=hybrid)
+                    status.update(label=f"Reading {len(sources)} supporting passages...")
+                    if not sources:
+                        answer = "I couldn’t find supporting passages in your library. Try a more specific question or add relevant documents."
+                        answer_slot.markdown(answer)
+                    else:
+                        for delta in chat.answer_stream(question=prompt, model_name=selected_model, history=previous,
+                                                        sources=sources, related_questions=related, source_limit=source_limit):
+                            answer += delta
+                            answer_slot.markdown(answer)
+                        if not answer.strip():
+                            raise ValueError("The model returned an empty response.")
+                    status.update(label="Answer ready", state="complete", expanded=False)
+        except Exception:
+            failure = True
+            if not answer:
+                answer = "I couldn’t complete this answer. Check the model service on the Health page, then retry."
+            answer_slot.markdown(answer)
+        render_chat_sources(sources)
+    messages.append({"role": "assistant", "content": answer, "sources": sources, "error": failure})
+    database.save_conversation(st.session_state["chat_session_id"], messages)
+    try:
+        chat.langfuse.flush()
+    except Exception:
+        pass
+    # Refresh the history picker and export with the newly persisted answer.
+    st.session_state["pending_conversation"] = st.session_state["chat_session_id"]
+    st.rerun()

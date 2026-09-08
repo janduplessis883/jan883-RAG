@@ -48,7 +48,6 @@ def sync_once(ingestion: IngestionService) -> dict:
 
     result = ingestion.ingest_notion_data_source(
         data_source_id=NOTION_DATA_SOURCE_ID,
-        tags=SYNC_TAGS,
     )
 
     notion = NotionHelper(
@@ -57,6 +56,7 @@ def sync_once(ingestion: IngestionService) -> dict:
     )
     notion_updates = 0
     notion_update_errors = 0
+    notion_tag_updates = 0
 
     for item in result.get("items", []):
         if item.get("status") not in {"ingested", "duplicate"}:
@@ -65,13 +65,26 @@ def sync_once(ingestion: IngestionService) -> dict:
         if not page_id:
             continue
         try:
+            source_tags = list(item.get("tags", []))
+            if item.get("status") == "duplicate" and item.get("source_id"):
+                existing = ingestion.database.get_source(int(item["source_id"]))
+                source_tags = list(existing.get("tags", [])) if existing else source_tags
+            tags = list(dict.fromkeys([*SYNC_TAGS, *source_tags]))
+            if item.get("status") == "ingested" and item.get("source_id"):
+                ingestion.database.update_source_tags(int(item["source_id"]), tags)
             notion._make_request(  # noqa: SLF001 - page-property update is not exposed publicly
                 "PATCH",
                 f"{NOTION_API_BASE}/pages/{page_id}",
-                {"properties": {"Ingested": {"checkbox": True}}},
+                {
+                    "properties": {
+                        "Ingested": {"checkbox": True},
+                        "Tags": {"multi_select": [{"name": tag} for tag in tags]},
+                    }
+                },
                 request_timeout=float(ingestion.config["notion"]["request_timeout_seconds"]),
             )
             notion_updates += 1
+            notion_tag_updates += 1
         except Exception as exc:  # noqa: BLE001 - report one failed checkbox update and continue
             notion_update_errors += 1
             logger.exception(
@@ -81,8 +94,10 @@ def sync_once(ingestion: IngestionService) -> dict:
             )
 
     result["notion_updates"] = notion_updates
+    result["notion_tag_updates"] = notion_tag_updates
     result["notion_update_errors"] = notion_update_errors
     result["errors"] = result.get("errors", 0) + notion_update_errors
+    ingestion.database.record_operation("sync:notion", result)
     return result
 
 
@@ -134,6 +149,7 @@ def run_sync() -> None:
                     f"{result.get('errors', 0)} errors"
                 )
             except Exception as exc:  # noqa: BLE001 - keep the periodic worker alive
+                database.record_operation("sync:notion", {"status": "error", "error": str(exc)})
                 logger.exception("Notion sync failed: {error}", error=exc)
                 console.print(f"[bold red]SYNC FAILED[/bold red] {exc}")
 

@@ -21,13 +21,13 @@ class SearchService:
         # Defaults keep pre-existing settings.toml files working.
         return self.config["retrieval"].get(key, default)
 
-    def search(self, query: str, limit: int | None = None, hybrid: bool | None = None) -> list[dict]:
+    def search(self, query: str, limit: int | None = None, hybrid: bool | None = None, source_ids: list[int] | None = None) -> list[dict]:
         """Single-query hybrid search for the Search page."""
         desired_limit = limit or int(self._setting("top_k", 8))
         min_similarity = float(self._setting("min_similarity", 0.0))
         dedupe_by_source = bool(self._setting("dedupe_by_source", False))
 
-        records = self.rank_candidates(query, hybrid=hybrid)
+        records = self.rank_candidates(query, hybrid=hybrid, source_ids=source_ids)
         # min_similarity gates weak dense-only matches; exact lexical matches
         # (person names, dates, codes) are never discarded by the semantic floor.
         records = [
@@ -38,7 +38,7 @@ class SearchService:
         ]
         return self.finish_results(records, limit=desired_limit, dedupe_by_source=dedupe_by_source)
 
-    def rank_candidates(self, query: str, hybrid: bool | None = None) -> list[dict]:
+    def rank_candidates(self, query: str, hybrid: bool | None = None, source_ids: list[int] | None = None) -> list[dict]:
         """Hybrid candidate pool for one query, ranked by RRF score.
 
         Applies no min_similarity gate, source dedupe, or final limit, so
@@ -46,7 +46,7 @@ class SearchService:
         at the very end.
         """
         use_hybrid = self._setting("hybrid_enabled", True) if hybrid is None else hybrid
-        return self._hybrid_pool(query) if use_hybrid else self._dense_pool(query)
+        return self._hybrid_pool(query, source_ids) if use_hybrid else self._dense_pool(query, source_ids)
 
     def finish_results(self, records: list[dict], *, limit: int, dedupe_by_source: bool) -> list[dict]:
         """Order fused records, dedupe by source, truncate, expand context."""
@@ -56,7 +56,7 @@ class SearchService:
         for record in ordered:
             if dedupe_by_source and record["source_id"] in seen_sources:
                 continue
-            record["preview"] = record["text"][:420]
+            record["preview"] = record["text"][:800]
             selected.append(record)
             seen_sources.add(record["source_id"])
             if len(selected) >= limit:
@@ -81,11 +81,11 @@ class SearchService:
                 record["text"] = " ".join(segment["text"] for segment in neighborhood)
         return results
 
-    def _hybrid_pool(self, query: str) -> list[dict]:
+    def _hybrid_pool(self, query: str, source_ids: list[int] | None = None) -> list[dict]:
         rrf_k = float(self._setting("rrf_k", 60))
         query_embedding = self.ollama.embed_texts([query])[0]
-        dense = self.database.search_candidates(query_embedding, limit=int(self._setting("candidate_k", 24)))
-        lexical = self.database.search_lexical(query, limit=int(self._setting("lexical_k", 24)))
+        dense = self.database.search_candidates(query_embedding, limit=int(self._setting("candidate_k", 24)), **({"source_ids": source_ids} if source_ids is not None else {}))
+        lexical = self.database.search_lexical(query, limit=int(self._setting("lexical_k", 24)), **({"source_ids": source_ids} if source_ids is not None else {}))
 
         fused: dict[int, dict] = {}
 
@@ -122,11 +122,11 @@ class SearchService:
         results.sort(key=lambda record: record["rrf_score"], reverse=True)
         return results
 
-    def _dense_pool(self, query: str) -> list[dict]:
+    def _dense_pool(self, query: str, source_ids: list[int] | None = None) -> list[dict]:
         """Return the dense ranking without querying FTS5."""
         query_embedding = self.ollama.embed_texts([query])[0]
         dense = self.database.search_candidates(
-            query_embedding, limit=int(self._setting("candidate_k", 24))
+            query_embedding, limit=int(self._setting("candidate_k", 24)), **({"source_ids": source_ids} if source_ids is not None else {})
         )
         chunks = {
             item["id"]: item

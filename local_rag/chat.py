@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Iterator
 
 from local_rag.embeddings import OllamaClient
@@ -204,7 +205,9 @@ class ChatService:
             )
             context_blocks.append(block)
 
+        today = datetime.now().date().isoformat()
         system_prompt = (
+            f"Today's date is {today}. "
             "You answer questions using only the provided knowledge base context. "
             "Be concise, grounded, and cite claims using source labels like [S1]. "
             "If the answer is uncertain, say so clearly."

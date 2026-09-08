@@ -1,6 +1,7 @@
 import streamlit as st
 
 from app_pages.common import render_runtime_sidebar, runtime
+from app_pages.ingest_feedback import run_import, show_import
 
 
 render_runtime_sidebar()
@@ -13,10 +14,16 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("Poll Telegram", icon=":material/sync:"):
         with st.spinner("Polling Telegram updates..."):
-            st.json(ingestion.sync_telegram())
+            run_import("telegram", "sync_telegram")
+    show_import("telegram")
     if st.button("Run backup", icon=":material/backup:"):
         with st.spinner("Creating backup snapshot..."):
-            st.json(backup.run_backup())
+            try:
+                result = backup.run_backup()
+                st.success("Backup created. Database integrity check passed.")
+                st.caption(result["destination"])
+            except Exception as exc:
+                st.error(f"Backup failed: {exc}")
     if st.button("Rebuild vector index", icon=":material/build:"):
         with st.spinner("Rebuilding vector index..."):
             ingestion.database.rebuild_vector_index()

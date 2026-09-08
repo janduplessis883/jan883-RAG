@@ -193,6 +193,7 @@ def run_watcher() -> None:
 
                 try:
                     result = ingest_watched_file(path, ingestion, database)
+                    database.record_operation("sync:folder", result)
                     status = result["status"]
                     if status == "ingested":
                         console.print(
@@ -204,6 +205,7 @@ def run_watcher() -> None:
                     elif status == "skipped_logged":
                         console.print(f"[dim]SKIPPED  {path.name} was already handled[/dim]")
                 except Exception as exc:  # noqa: BLE001 - continue watching other files
+                    database.record_operation("sync:folder", {"status": "error", "error": str(exc), "file_path": str(path)})
                     console.print(f"[bold red]INGESTION FAILED[/bold red] {path.name}: {exc}")
                     logger.exception("Ingestion failed for {path}", path=path)
     except KeyboardInterrupt:
