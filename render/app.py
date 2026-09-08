@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
@@ -15,7 +14,6 @@ from typing import Any
 from bs4 import BeautifulSoup
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from notionhelper import NotionHelper
 
 
 RESEND_API_BASE = "https://api.resend.com"
@@ -186,7 +184,7 @@ async def download_attachment(
     client: httpx.AsyncClient,
     attachment: dict[str, Any],
     email_id: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     filename = str(attachment.get("filename") or "attachment")
     content_type = str(attachment.get("content_type") or "application/octet-stream")
     size = int(attachment.get("size") or 0)
@@ -211,9 +209,46 @@ async def download_attachment(
     )
     try:
         temporary_file.write(content)
-        return temporary_file.name, filename
+        return temporary_file.name, filename, content_type
     finally:
         temporary_file.close()
+
+
+async def upload_attachment_to_notion(
+    client: httpx.AsyncClient,
+    file_path: str,
+    filename: str,
+    content_type: str,
+) -> str:
+    """Create and send a Notion single-part file upload."""
+    create_upload = await client.post(
+        f"{NOTION_API_BASE}/file_uploads",
+        headers=notion_headers(),
+        json={
+            "mode": "single_part",
+            "filename": filename,
+            "content_type": content_type,
+        },
+    )
+    upload = unwrap_data(create_upload)
+    upload_url = upload.get("upload_url")
+    if not upload_url:
+        raise ValueError(f"Notion did not provide an upload URL for {filename}")
+
+    with open(file_path, "rb") as file_handle:
+        send = await client.post(
+            upload_url,
+            headers={
+                "Authorization": f"Bearer {required_setting('NOTION_TOKEN')}",
+                "Notion-Version": NOTION_FILE_UPLOAD_VERSION,
+            },
+            files={"file": (filename, file_handle, content_type)},
+        )
+    uploaded = unwrap_data(send)
+    upload_id = uploaded.get("id") or upload.get("id")
+    if not upload_id:
+        raise ValueError(f"Notion did not return a file upload ID for {filename}")
+    return str(upload_id)
 
 
 async def already_archived(client: httpx.AsyncClient, message_id: str) -> bool:
@@ -349,16 +384,20 @@ async def receive_resend_webhook(request: Request) -> dict[str, Any]:
 
         attachments = await resend_get(client, f"/emails/receiving/{email_id}/attachments")
         page = await create_notion_page(client, email)
-        notion = NotionHelper(required_setting("NOTION_TOKEN"), request_timeout=60)
         notion_files = []
         for attachment in attachments.get("data", attachments.get("attachments", [])):
-            temporary_path, filename = await download_attachment(client, attachment, email_id)
+            temporary_path, filename, content_type = await download_attachment(client, attachment, email_id)
             try:
-                upload = await asyncio.to_thread(notion.upload_file, temporary_path)
+                upload_id = await upload_attachment_to_notion(
+                    client,
+                    temporary_path,
+                    filename,
+                    content_type,
+                )
                 notion_files.append(
                     {
                         "type": "file_upload",
-                        "file_upload": {"id": str(upload["id"])},
+                        "file_upload": {"id": upload_id},
                         "name": filename,
                     }
                 )
