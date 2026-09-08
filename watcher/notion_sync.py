@@ -66,7 +66,11 @@ def sync_once(ingestion: IngestionService) -> dict:
             continue
         try:
             source_tags = list(item.get("tags", []))
-            if item.get("status") == "duplicate" and item.get("source_id"):
+            if (
+                item.get("status") == "duplicate"
+                and item.get("source_id")
+                and set(source_tags).issubset(set(SYNC_TAGS))
+            ):
                 existing = ingestion.database.get_source(int(item["source_id"]))
                 source_tags = list(existing.get("tags", [])) if existing else source_tags
             tags = list(dict.fromkeys([*SYNC_TAGS, *source_tags]))

@@ -25,7 +25,9 @@ with st.expander("Ingest URL", expanded=False, icon=":material/link:"):
         submit_url = st.form_submit_button("Ingest URL", type="primary", icon=":material/download:")
     if preview_url and url.strip():
         with st.spinner("Loading URL..."):
-            st.session_state["url_preview"] = ingestion.preview_url(url.strip())
+            preview = ingestion.preview_url(url.strip())
+            st.session_state["url_preview"] = preview
+            st.session_state["url_preview_text"] = preview["text"]
     if st.session_state["url_preview"]:
         preview = st.session_state["url_preview"]
         with st.container(border=True):
@@ -131,9 +133,11 @@ with st.expander("Ingest Notion page", expanded=False, icon=":material/descripti
         )
     if preview_notion_page and notion_page_input.strip():
         with st.spinner("Loading Notion page..."):
-            st.session_state["notion_page_preview"] = ingestion.preview_notion_page(
+            preview = ingestion.preview_notion_page(
                 notion_page_input.strip()
             )
+            st.session_state["notion_page_preview"] = preview
+            st.session_state["notion_page_preview_text"] = preview["text"]
     if st.session_state["notion_page_preview"]:
         preview = st.session_state["notion_page_preview"]
         with st.container(border=True):

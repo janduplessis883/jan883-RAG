@@ -21,6 +21,7 @@ from notionhelper import NotionHelper
 RESEND_API_BASE = "https://api.resend.com"
 NOTION_API_BASE = "https://api.notion.com/v1"
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2026-03-11")
+NOTION_FILE_UPLOAD_VERSION = "2025-09-03"
 MAX_NOTION_SINGLE_PART_BYTES = 20 * 1024 * 1024
 WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300
 
@@ -370,7 +371,10 @@ async def receive_resend_webhook(request: Request) -> dict[str, Any]:
         if notion_files:
             attachment_update = await client.patch(
                 f"{NOTION_API_BASE}/pages/{page['id']}",
-                headers=notion_headers(),
+                headers={
+                    **notion_headers(),
+                    "Notion-Version": NOTION_FILE_UPLOAD_VERSION,
+                },
                 json={"properties": {"Attachments": {"files": notion_files}}},
             )
             attachment_update.raise_for_status()

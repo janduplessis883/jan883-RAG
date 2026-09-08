@@ -24,6 +24,7 @@ from local_rag.telegram_sync import TelegramBotClient
 class IngestionService:
     TAG_SUGGESTION_MAX_CHARS = 6000
     TAG_SUGGESTION_MODEL = "gemma-4-26b-a4b-it-4bit"
+    GENERIC_TAGS = {"text", "document", "file", "url", "article", "note", "pdf", "markdown"}
 
     def __init__(self, config_manager, database) -> None:
         self.config_manager = config_manager
@@ -68,6 +69,10 @@ class IngestionService:
             expand_child_pages=True,
             max_child_page_depth=max_child_page_depth,
         )
+        if not payload.get("content") and hasattr(notion, "get_page_markdown"):
+            markdown_response = notion.get_page_markdown(page_id, include_transcript=True)
+            if isinstance(markdown_response, dict):
+                payload["content"] = markdown_response.get("markdown", "")
         markdown, child_page_ids = self._notion_markdown_with_children(payload)
 
         title = self._extract_notion_title(payload.get("properties", {}), fallback=f"Notion page {page_id[:8]}")
@@ -148,6 +153,12 @@ class IngestionService:
         for index, row in enumerate(preview["records"], start=1):
             page_id = row.get("notion_page_id")
             label = self._row_display_title(row, fallback=str(page_id or f"row-{index}"))
+            notion_tags = self._extract_notion_row_tags(row)
+            content_tags = (
+                notion_tags
+                if notion_tags and not set(notion_tags).issubset({"email", "work"})
+                else None
+            )
             if progress_callback:
                 progress_callback(index - 1, total, label)
 
@@ -162,7 +173,10 @@ class IngestionService:
                 if existing:
                     existing_source = self.database.get_source(int(existing["id"]))
                     existing_tags = list(existing_source.get("tags", [])) if existing_source else []
-                    if (
+                    if content_tags:
+                        existing_tags = content_tags
+                        self.database.update_source_tags(int(existing["id"]), existing_tags)
+                    elif (
                         tags is None
                         and existing_source
                         and set(existing_tags).issubset({"email", "work"})
@@ -195,7 +209,7 @@ class IngestionService:
                     source_type="notion_data_source_page",
                     title=page_preview["title"],
                     text=page_preview["text"],
-                    tags=tags,
+                    tags=content_tags if content_tags is not None else tags,
                     canonical_uri=page_preview["canonical_uri"],
                     external_ref=f"notion://data-source/{preview['data_source_id']}",
                     metadata=merged_metadata,
@@ -227,6 +241,32 @@ class IngestionService:
             "errors": errors,
             "items": results,
         }
+
+    def _extract_notion_row_tags(self, row: dict) -> list[str]:
+        """Read Notion's Tags multi-select value from a data-source row."""
+        value = next(
+            (row.get(key) for key in ("Tags", "tags", "Tag", "tag") if row.get(key) is not None),
+            None,
+        )
+        if value is None:
+            return []
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+                value = decoded
+            except json.JSONDecodeError:
+                value = value.split(",")
+        if not isinstance(value, list):
+            value = [value]
+
+        normalized: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                item = item.get("name") or item.get("plain_text") or item.get("value")
+            tag = re.sub(r"\s+", " ", str(item or "").strip().lower()).strip(" #-_")
+            if tag and tag not in normalized:
+                normalized.append(tag)
+        return normalized
 
     def ingest_text(
         self,
@@ -661,11 +701,20 @@ class IngestionService:
         content_hash = sha256_text(clean_text)
         duplicate = self.database.find_duplicate(canonical_uri, content_hash)
         if duplicate:
+            existing_source = self.database.get_source(int(duplicate["id"]))
+            existing_tags = list(existing_source.get("tags", [])) if existing_source else []
+            if tags is None and existing_source and set(existing_tags).issubset(self.GENERIC_TAGS):
+                existing_tags = self.suggest_tags(
+                    title=existing_source["title"],
+                    text=existing_source.get("full_text", clean_text),
+                )
+                self.database.update_source_tags(int(duplicate["id"]), existing_tags)
             return {
                 "status": "duplicate",
                 "source_id": int(duplicate["id"]),
                 "title": duplicate["title"],
                 "canonical_uri": duplicate["canonical_uri"],
+                "tags": existing_tags,
             }
 
         suggested_tags = tags if tags is not None else self.suggest_tags(title=title, text=clean_text)
@@ -769,8 +818,10 @@ class IngestionService:
             return []
         system_prompt = (
             "You create tags for a personal knowledge-base search index. "
-            "Suggest 3 to 8 specific, useful tags describing the subject, people, "
-            "project, organization, content type, or important themes. "
+            "Suggest 3 to 8 specific, useful tags describing the actual subject, "
+            "people, project, organization, named entities, or important themes. "
+            "Never use generic source-type labels such as text, document, file, "
+            "note, URL, article, PDF, or markdown as tags. "
             "Use short lowercase phrases with spaces, not hashtags. "
             'Return JSON only in the form {"tags": ["tag one", "tag two"]}. '
             "Do not explain your choices."
@@ -791,7 +842,7 @@ class IngestionService:
             normalized: list[str] = []
             for candidate in candidates:
                 tag = re.sub(r"\s+", " ", str(candidate).strip().lower()).strip(" #-_")
-                if tag and tag not in normalized:
+                if tag and tag not in self.GENERIC_TAGS and tag not in normalized:
                     normalized.append(tag)
             return normalized[:8]
         except Exception:  # noqa: BLE001 - tagging must not block ingestion
