@@ -87,9 +87,14 @@ class LangfuseObserver:
                     observation.update(level="ERROR", status_message=str(exc)[:500])
                     raise
                 finally:
-                    trace_id = self.client.get_current_trace_id()
-                    if trace_id:
-                        self.last_trace_url = self.client.get_trace_url(trace_id=trace_id)
+                    # Telemetry cleanup must never turn a completed answer into
+                    # an interrupted chat response.
+                    try:
+                        trace_id = self.client.get_current_trace_id()
+                        if trace_id:
+                            self.last_trace_url = self.client.get_trace_url(trace_id=trace_id)
+                    except Exception:
+                        pass
 
     @contextmanager
     def observation(

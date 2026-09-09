@@ -64,6 +64,17 @@ def test_trash_excludes_dense_lexical_and_restores(runtime):
     assert runtime[3].search('Original')
 
 
+def test_library_trash_with_one_document_renders(runtime):
+    sid = add(runtime)
+    runtime[1].set_source_removed(sid, True)
+
+    at = page(runtime, 'library')
+    at.toggle[0].set_value(True).run()
+
+    assert not at.exception
+    assert 'Original' in at.dataframe[0].value['Title'].tolist()
+
+
 def test_update_replaces_text_and_fts(runtime):
     sid = add(runtime)
     runtime[2].update_source(sid, title='Replacement', text='New unique zebra evidence', tags=['personal'])
@@ -72,6 +83,85 @@ def test_update_replaces_text_and_fts(runtime):
     assert db.get_source(sid)['tags'] == ['personal']
     assert db.search_lexical('zebra', 8)
     assert not db.search_lexical('Original', 8)
+
+
+def test_ingested_url_stores_extracted_text_not_raw_html(runtime, monkeypatch):
+    class FakeResponse:
+        text = """
+        <!doctype html>
+        <html><head><title>Example article</title><script>alert('noise')</script></head>
+        <body><article><h1>Example article</h1><p>Readable article text.</p></article></body></html>
+        """
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("local_rag.extractors.requests.get", lambda *args, **kwargs: FakeResponse())
+
+    source_id = runtime[2].ingest_url(
+        "https://example.com/article",
+        tags=["web"],
+        chunking={"strategy": "fixed"},
+    )["source_id"]
+    source = runtime[1].get_source(source_id)
+
+    assert source["full_text"] == "Example article\n\nReadable article text."
+    assert "<html" not in source["full_text"]
+    assert "<script" not in source["full_text"]
+
+
+def test_reingesting_trashed_url_restores_it(runtime, monkeypatch):
+    class FakeResponse:
+        text = "<html><body><article><p>Restorable article.</p></article></body></html>"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("local_rag.extractors.requests.get", lambda *args, **kwargs: FakeResponse())
+
+    ingestion = runtime[2]
+    source_id = ingestion.ingest_url(
+        "https://example.com/restorable",
+        tags=["web"],
+        chunking={"strategy": "fixed"},
+    )["source_id"]
+    runtime[1].set_source_removed(source_id, True)
+
+    result = ingestion.ingest_url(
+        "https://example.com/restorable",
+        tags=["web"],
+        chunking={"strategy": "fixed"},
+    )
+
+    assert result["status"] == "restored"
+    assert runtime[1].get_source(source_id)["deleted_at"] is None
+
+
+def test_legacy_article_html_is_repaired_on_read(runtime, tmp_path):
+    raw_path = tmp_path / "legacy-source.html"
+    raw_path.write_text(
+        "<html><head><script>noise()</script></head><body><p>Legacy text.</p></body></html>",
+        encoding="utf-8",
+    )
+    source_id = runtime[1].insert_source(
+        source_type="article",
+        title="Legacy article",
+        canonical_uri="https://example.com/legacy",
+        external_ref=None,
+        content_hash="legacy-html",
+        summary="Legacy text.",
+        tags=["web"],
+        metadata={},
+        raw_text_path=str(raw_path),
+        raw_binary_path=None,
+    )
+
+    source = runtime[1].get_source(source_id)
+
+    assert source["full_text"] == "Legacy text."
+    assert runtime[1].connection.execute(
+        "SELECT full_text FROM sources WHERE id=?", (source_id,)
+    ).fetchone()[0] == "Legacy text."
 
 
 def test_failed_update_rolls_back_all_indexes(runtime):
@@ -149,7 +239,7 @@ def test_chat_default_and_example_saved(runtime, monkeypatch):
     at.session_state['runtime'] = runtime
     at.run()
     assert not at.exception
-    assert at.title[0].value == 'Ask your knowledge base'
+    assert not any(title.value == 'Ask your knowledge base' for title in at.title)
     next(b for b in at.button if b.label == 'What decisions were made in the meeting notes?').click().run()
     assert not at.exception
     history = runtime[1].list_conversations()

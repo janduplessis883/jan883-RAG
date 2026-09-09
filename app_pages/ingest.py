@@ -46,8 +46,9 @@ with st.expander("Ingest URL", expanded=False, icon=":material/link:"):
 
     show_import("url")
 
-with st.expander("Ingest text", expanded=False, icon=":material/article:"):
+with st.expander("Ingest text or Markdown", expanded=False, icon=":material/article:"):
     text_chunking = render_chunking_controls("text", config)
+    st.caption("Paste plain text or Markdown. Headings, lists, links, and emphasis remain searchable and render correctly in the Library.")
     with st.form("ingest_text"):
         title = st.text_input("Title")
         text = st.text_area("Text", height=240)
@@ -113,13 +114,6 @@ with st.expander("Ingest Markdown directory", expanded=False, icon=":material/fo
 
 
     show_import("directory")
-
-with st.expander("Markdown ingestion log", expanded=False, icon=":material/history:"):
-    log_rows = database.list_ingestion_log(limit=100)
-    if log_rows:
-        st.dataframe(log_rows)
-    else:
-        st.info("No Markdown files have been logged yet.")
 
 with st.expander("Ingest Notion page", expanded=False, icon=":material/description:"):
     notion_page_chunking = render_chunking_controls("notion_page", config)

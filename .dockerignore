@@ -1,0 +1,12 @@
+.git
+.venv
+.mypy_cache
+.pytest_cache
+__pycache__
+*.pyc
+.streamlit/secrets.toml
+config/secrets.toml
+data
+logs
+*.egg-info
+render

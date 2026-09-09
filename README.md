@@ -39,6 +39,28 @@ ollama list
 make app
 ```
 
+## Local API
+
+Start the local FastAPI service alongside the Streamlit app:
+
+```bash
+make api
+```
+
+The API binds to `127.0.0.1:8000` and exposes:
+
+- `GET /health` — database statistics and Ollama availability
+- `POST /search` — hybrid or dense/lexical search
+- `POST /chat` — grounded answers with related questions and source passages
+
+Example search request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What decisions were made?","limit":5}'
+```
+
 ## Notes
 
 - Hybrid retrieval is enabled by default and can be disabled in the Chat sidebar with **Hybrid retrieval (FTS5 + dense)**, or via `retrieval.hybrid_enabled` in `config/settings.toml`.

@@ -4,9 +4,65 @@ import streamlit as st
 from app_pages.common import get_answer_models, render_chat_sources, render_runtime_details, runtime
 from local_rag.presentation import export_conversation
 
+
 _, database, _, _, chat, _ = runtime()
 merged = chat.config
-st.title("Ask your knowledge base")
+st.html("""
+<div class="rag-banner" role="banner" aria-label="jan883-RAG">
+    <span>jan883-RAG</span>
+</div>
+<style>
+    .rag-banner {
+        align-items: center;
+        animation: rag-gradient 14s ease-in-out infinite;
+        background: linear-gradient(120deg, #252f3d 0%, #263b4d 48%, #3a5367 100%);
+        background-size: 200% 200%;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 16px;
+        box-shadow: 0 14px 28px rgba(17, 24, 39, 0.24);
+        box-sizing: border-box;
+        color: #ffffff;
+        display: flex;
+        min-height: 116px;
+        padding: 0.5rem 2.5rem;
+        transition: box-shadow 160ms ease, transform 160ms ease;
+        width: 100%;
+    }
+
+    @keyframes rag-gradient {
+        0%, 100% {
+            background-position: 0% 50%;
+        }
+        50% {
+            background-position: 100% 50%;
+        }
+    }
+
+    .rag-banner span {
+        font-size: clamp(2.25rem, 6vw, 4.5rem);
+        font-weight: 800;
+        letter-spacing: -0.04em;
+        line-height: 1;
+    }
+
+    .rag-banner:hover {
+        box-shadow: 0 6px 12px rgba(17, 24, 39, 0.2);
+        transform: translateY(4px);
+    }
+
+    .rag-banner:active {
+        box-shadow: 0 3px 6px rgba(17, 24, 39, 0.18);
+        transform: translateY(6px);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .rag-banner {
+            animation: none;
+            transition: none;
+        }
+    }
+</style>
+""")
 st.caption("Answers grounded in your documents, with passages you can verify.")
 st.session_state.setdefault("chat_messages", [])
 st.session_state.setdefault("chat_session_id", str(uuid4()))
@@ -17,6 +73,7 @@ with st.sidebar:
         st.session_state["chat_messages"] = []
         st.session_state["chat_session_id"] = str(uuid4())
         st.session_state["conversation_picker"] = None
+    st.divider()
     conversations = database.list_conversations()
     titles = {row["id"]: row["title"] for row in conversations}
     options = [None, *titles]
@@ -28,6 +85,7 @@ with st.sidebar:
     if selected and selected != st.session_state["chat_session_id"]:
         st.session_state["chat_messages"] = database.load_conversation(selected)
         st.session_state["chat_session_id"] = selected
+    st.divider()
     with st.expander("Advanced settings", icon=":material/tune:"):
         models = get_answer_models(chat, merged["ollama"]["answer_models"], merged["ollama"]["default_answer_model"])
         selected_model = st.selectbox("Answer model", models,
@@ -86,26 +144,36 @@ if prompt:
         try:
             with chat.langfuse.trace("chat-response", session_id=st.session_state["chat_session_id"],
                                      input_data={"question": prompt, "model": selected_model}, tags=["streamlit", "rag-chat"]):
-                with st.status("Finding supporting passages...", expanded=False) as status:
-                    related = []
-                    if multi_query:
-                        try:
-                            related = chat.generate_related_questions(prompt)
-                        except Exception:
-                            status.write("Search expansion unavailable; using your original question.")
-                    sources = chat.retrieve_sources(prompt, related_questions=related, source_limit=source_limit, hybrid=hybrid)
-                    status.update(label=f"Reading {len(sources)} supporting passages...")
-                    if not sources:
-                        answer = "I couldn’t find supporting passages in your library. Try a more specific question or add relevant documents."
+                related = []
+                with st.sidebar:
+                    with st.status("Finding supporting passages...", type="step", expanded=True) as status:
+                        if multi_query:
+                            try:
+                                related = chat.generate_related_questions(prompt)
+                            except Exception:
+                                status.write("Search expansion unavailable; using your original question.")
+                        sources = chat.retrieve_sources(
+                            prompt,
+                            related_questions=related,
+                            source_limit=source_limit,
+                            hybrid=hybrid,
+                        )
+                        status.update(
+                            label=f"Found {len(sources)} supporting passages",
+                            state="complete",
+                            expanded=False,
+                        )
+
+                if not sources:
+                    answer = "I couldn’t find supporting passages in your library. Try a more specific question or add relevant documents."
+                    answer_slot.markdown(answer)
+                else:
+                    for delta in chat.answer_stream(question=prompt, model_name=selected_model, history=previous,
+                                                    sources=sources, related_questions=related, source_limit=source_limit):
+                        answer += delta
                         answer_slot.markdown(answer)
-                    else:
-                        for delta in chat.answer_stream(question=prompt, model_name=selected_model, history=previous,
-                                                        sources=sources, related_questions=related, source_limit=source_limit):
-                            answer += delta
-                            answer_slot.markdown(answer)
-                        if not answer.strip():
-                            raise ValueError("The model returned an empty response.")
-                    status.update(label="Answer ready", state="complete", expanded=False)
+                    if not answer.strip():
+                        raise ValueError("The model returned an empty response.")
         except Exception:
             failure = True
             if not answer:

@@ -1,9 +1,12 @@
 PYTHON ?= python
 
-.PHONY: app init stats sync-telegram backup reindex watch-folder sync-notion format lint
+.PHONY: app api init stats sync-telegram backup reindex watch-folder sync-notion format lint
 
 app:
 	streamlit run app.py
+
+api:
+	uvicorn api:app --host 127.0.0.1 --port 8005
 
 init:
 	$(PYTHON) -m local_rag.cli init

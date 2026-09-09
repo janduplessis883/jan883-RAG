@@ -105,12 +105,12 @@ def ingest_watched_file(path: Path, ingestion: IngestionService, database: Datab
 
     content = wait_for_stable_file(path)
     content_hash = hashlib.sha256(content).hexdigest()
-    tags = tags_for_file(path)
+    source_tags = tags_for_file(path)
     try:
         result = ingestion.ingest_file(
             filename=path.name,
             content=content,
-            tags=tags,
+            tags=source_tags,
             source_type="onedrive_file",
             canonical_uri=path.as_uri(),
             external_ref=str(SCANNING_DIRECTORY),
@@ -119,6 +119,7 @@ def ingest_watched_file(path: Path, ingestion: IngestionService, database: Datab
                 "file_path": file_path,
                 "file_extension": path.suffix.lower(),
                 "automated": True,
+                "auto_generate_tags": True,
             },
         )
         log_status = result["status"]

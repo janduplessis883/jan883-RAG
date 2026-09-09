@@ -702,6 +702,23 @@ class IngestionService:
         duplicate = self.database.find_duplicate(canonical_uri, content_hash)
         if duplicate:
             existing_source = self.database.get_source(int(duplicate["id"]))
+            if existing_source and existing_source["deleted_at"]:
+                self.database.set_source_removed(int(duplicate["id"]), False)
+                refreshed = self.update_source(
+                    int(duplicate["id"]),
+                    title=title,
+                    text=clean_text,
+                    tags=tags if tags is not None else existing_source.get("tags", []),
+                )
+                return {
+                    "status": "restored",
+                    "source_id": int(duplicate["id"]),
+                    "title": refreshed["title"],
+                    "canonical_uri": duplicate["canonical_uri"],
+                    "tags": tags if tags is not None else existing_source.get("tags", []),
+                    "chunk_count": refreshed["chunk_count"],
+                    "message": "Restored from Trash during re-ingestion.",
+                }
             existing_tags = list(existing_source.get("tags", [])) if existing_source else []
             if tags is None and existing_source and set(existing_tags).issubset(self.GENERIC_TAGS):
                 existing_tags = self.suggest_tags(
@@ -717,7 +734,10 @@ class IngestionService:
                 "tags": existing_tags,
             }
 
-        suggested_tags = tags if tags is not None else self.suggest_tags(title=title, text=clean_text)
+        generated_tags = self.suggest_tags(title=title, text=clean_text) if (
+            tags is None or metadata.get("auto_generate_tags")
+        ) else []
+        suggested_tags = list(dict.fromkeys([*(tags or []), *generated_tags]))
 
         slug = sanitize_filename(title)[:80]
         source_dir = self.raw_dir / slug
@@ -789,6 +809,7 @@ class IngestionService:
             external_ref=external_ref,
             content_hash=content_hash,
             summary=clean_text[:280],
+            full_text=clean_text,
             tags=suggested_tags,
             metadata=stored_metadata,
             raw_text_path=str(raw_text_path),

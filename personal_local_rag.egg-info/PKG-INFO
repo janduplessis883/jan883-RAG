@@ -5,15 +5,17 @@ Summary: Local-first personal RAG system with Streamlit, SQLite, Ollama, and Tel
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: beautifulsoup4>=4.12.3
+Requires-Dist: fastapi<1,>=0.115.0
 Requires-Dist: notionhelper>=0.6.4
 Requires-Dist: readability-lxml>=0.8.1
 Requires-Dist: requests>=2.32.3
-Requires-Dist: streamlit>=1.44.0
+Requires-Dist: streamlit>=1.56.0
 Requires-Dist: pypdf>=4.2.0
 Requires-Dist: sqlite-vec>=0.1.6
 Requires-Dist: langfuse>=3.3.1
 Requires-Dist: loguru>=0.7.3
 Requires-Dist: rich>=14.0.0
+Requires-Dist: uvicorn[standard]<1,>=0.34.0
 Requires-Dist: watchfiles>=1.1.0
 
 # Personal Local RAG
@@ -57,6 +59,28 @@ ollama list
 make app
 ```
 
+## Local API
+
+Start the local FastAPI service alongside the Streamlit app:
+
+```bash
+make api
+```
+
+The API binds to `127.0.0.1:8000` and exposes:
+
+- `GET /health` — database statistics and Ollama availability
+- `POST /search` — hybrid or dense/lexical search
+- `POST /chat` — grounded answers with related questions and source passages
+
+Example search request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What decisions were made?","limit":5}'
+```
+
 ## Notes
 
 - Hybrid retrieval is enabled by default and can be disabled in the Chat sidebar with **Hybrid retrieval (FTS5 + dense)**, or via `retrieval.hybrid_enabled` in `config/settings.toml`.
@@ -79,16 +103,69 @@ Install the updated dependencies into the existing environment:
 pip install -e .
 ```
 
-Start watching a OneDrive folder (replace the path with the folder synced on your laptop):
+Start watching the configured OneDrive folder:
 
 ```bash
-make watch-folder FOLDER="/Users/your-name/OneDrive/Inbox"
+make watch-folder
 ```
 
 Or run it directly:
 
 ```bash
-python -m local_rag.folder_watcher "/Users/your-name/OneDrive/Inbox"
+python -m watcher.folder_watcher
 ```
 
-The watcher recursively reports added, modified, and deleted files in the terminal. It writes a rotating log to `logs/folder-watcher.log` by default. It only observes changes for now; it does not move, read, upload, or process files. Stop it with `Ctrl+C`.
+The scanning directory is defined by `SCANNING_DIRECTORY` in `watcher/folder_watcher.py`. The watcher recursively reports added, modified, and deleted files in the terminal. New or changed PDF, TXT, and Markdown (`.md`) files are automatically passed to the existing RAG ingestion service, embedded with the configured Ollama model, and stored in the SQLite database. Files are tagged with `onedrive` and their file type. It writes a rotating log to `logs/folder-watcher.log`; unsupported file types are reported and ignored. Stop it with `Ctrl+C`.
+
+### Run automatically in the background on macOS
+
+The repository includes a LaunchAgent at `launchd/com.janduplessis.jan883-rag.folder-watcher.plist`. It starts the watcher when you log in and restarts it if it exits.
+
+Install and load it for your user account:
+
+```bash
+mkdir -p logs ~/Library/LaunchAgents
+cp launchd/com.janduplessis.jan883-rag.folder-watcher.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.janduplessis.jan883-rag.folder-watcher.plist
+```
+
+Check its status:
+
+```bash
+launchctl print gui/$(id -u)/com.janduplessis.jan883-rag.folder-watcher
+```
+
+Stop and remove it:
+
+```bash
+launchctl bootout gui/$(id -u)/com.janduplessis.jan883-rag.folder-watcher
+rm ~/Library/LaunchAgents/com.janduplessis.jan883-rag.folder-watcher.plist
+```
+
+LaunchAgent stdout and stderr are written to `logs/folder-watcher.stdout.log` and `logs/folder-watcher.stderr.log`.
+
+## Local Notion-to-RAG sync
+
+The Notion email archive can be synced into the local RAG database every 10 minutes:
+
+```bash
+make sync-notion
+```
+
+The worker runs one sync immediately, then repeats every 10 minutes. It uses the
+Notion data source `f07c5456-62e7-4589-848d-d87fca9a483c`, ingests page text only,
+and skips pages already present in the local database. PDF and other attachments
+are deliberately not downloaded or ingested yet.
+After a page is successfully ingested, or is found to be already present locally,
+the worker sets its Notion `Ingested` checkbox to true.
+
+To run it automatically at login, install its LaunchAgent:
+
+```bash
+mkdir -p logs ~/Library/LaunchAgents
+cp launchd/com.janduplessis.jan883-rag.notion-sync.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.janduplessis.jan883-rag.notion-sync.plist
+```
+
+Its Loguru log is `logs/notion-sync.log`; LaunchAgent stdout and stderr are
+`logs/notion-sync.stdout.log` and `logs/notion-sync.stderr.log`.

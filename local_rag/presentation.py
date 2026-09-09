@@ -14,7 +14,7 @@ def filter_sources(rows, query="", tags=(), types=(), start=None, end=None):
 def ingestion_counts(result):
     items = result.get("items", [result])
     return {
-        "added": result.get("ingested", sum(item.get("status") in {"ingested", "updated"} for item in items)),
+        "added": result.get("ingested", sum(item.get("status") in {"ingested", "updated", "restored"} for item in items)),
         "duplicates": result.get("duplicates", sum(item.get("status") == "duplicate" for item in items)),
         "skipped": result.get("skipped_logged", sum(item.get("status", "").startswith("skipped") for item in items)),
         "failed": result.get("errors", sum(item.get("status") == "error" for item in items)),

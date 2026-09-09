@@ -49,7 +49,14 @@ def get_answer_models(chat, configured_models, default_model):
     return list(dict.fromkeys(health["models"] or [default_model, *configured_models]))
 
 
-def render_source_content(item, *, markdown=False):
+TAG_BADGE_COLORS = ("blue", "green", "yellow", "orange", "red", "violet", "gray")
+
+
+def _tag_badge_color(tag: str) -> str:
+    return TAG_BADGE_COLORS[sum(map(ord, tag.lower())) % len(TAG_BADGE_COLORS)]
+
+
+def render_source_content(item, *, markdown=False, tags_as_badges=False):
     st.caption(f"{item['source_type']} · Passage {item.get('chunk_index', 0) + 1}")
     uri = item.get("canonical_uri")
     if uri and source_link(uri).startswith(("https://", "http://")):
@@ -59,7 +66,11 @@ def render_source_content(item, *, markdown=False):
         st.markdown(text)
     else:
         st.text(text)
-    if item.get("tags"):
+    if tags_as_badges and item.get("tags"):
+        with st.container(horizontal=True):
+            for tag in item["tags"]:
+                st.badge(tag, color=_tag_badge_color(tag))
+    elif item.get("tags"):
         st.caption("Tags: " + ", ".join(item["tags"]))
 
 
@@ -87,7 +98,7 @@ def render_chat_sources(sources):
         for index, item in enumerate(sources, 1):
             with st.popover(f"[S{index}] {item['title'][:45]}"):
                 st.markdown(f"**{item['title']}**")
-                render_source_content(item, markdown=True)
+                render_source_content(item, markdown=True, tags_as_badges=True)
 
 
 def render_chunking_controls(key_prefix: str, config: dict) -> dict:

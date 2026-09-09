@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from local_rag.chunking import cosine_similarity
+from local_rag.extractors import extract_html_text
 
 
 def synchronized(method):
@@ -176,6 +177,7 @@ class Database:
         external_ref: str | None,
         content_hash: str,
         summary: str,
+        full_text: str | None = None,
         tags: list[str],
         metadata: dict[str, Any],
         raw_text_path: str | None,
@@ -185,8 +187,8 @@ class Database:
             """
             INSERT INTO sources (
                 source_type, title, canonical_uri, external_ref, content_hash,
-                summary, tags_json, metadata_json, raw_text_path, raw_binary_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                summary, full_text, tags_json, metadata_json, raw_text_path, raw_binary_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source_type,
@@ -195,6 +197,7 @@ class Database:
                 external_ref,
                 content_hash,
                 summary,
+                full_text,
                 json.dumps(tags),
                 json.dumps(metadata),
                 raw_text_path,
@@ -582,6 +585,15 @@ class Database:
                 text = Path(source["raw_text_path"]).read_text(encoding="utf-8")
             except OSError:
                 pass
+            if text and source["source_type"] == "article":
+                extracted_text = extract_html_text(text)
+                if extracted_text:
+                    text = extracted_text
+                    self.connection.execute(
+                        "UPDATE sources SET full_text=? WHERE id=?",
+                        (text, source_id),
+                    )
+                    self.connection.commit()
         if text is None:
             text = "\n\n".join(r[0] for r in self.connection.execute(
                 "SELECT text FROM chunks WHERE source_id = ? ORDER BY chunk_index", (source_id,)))

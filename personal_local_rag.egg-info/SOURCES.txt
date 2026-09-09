@@ -1,4 +1,5 @@
 README.md
+api.py
 pyproject.toml
 local_rag/__init__.py
 local_rag/backup.py
@@ -9,9 +10,9 @@ local_rag/config.py
 local_rag/database.py
 local_rag/embeddings.py
 local_rag/extractors.py
-local_rag/folder_watcher.py
 local_rag/ingestion.py
 local_rag/observability.py
+local_rag/presentation.py
 local_rag/retrieval.py
 local_rag/telegram_sync.py
 personal_local_rag.egg-info/PKG-INFO
@@ -19,4 +20,11 @@ personal_local_rag.egg-info/SOURCES.txt
 personal_local_rag.egg-info/dependency_links.txt
 personal_local_rag.egg-info/requires.txt
 personal_local_rag.egg-info/top_level.txt
+tests/test_api.py
+tests/test_folder_watcher.py
+tests/test_library_experience.py
+tests/test_render_routing.py
 tests/test_retrieval.py
+watcher/__init__.py
+watcher/folder_watcher.py
+watcher/notion_sync.py

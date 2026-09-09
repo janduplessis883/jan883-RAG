@@ -52,6 +52,25 @@ def extract_urls(text: str) -> list[str]:
     return re.findall(r"https?://[^\s<>\"]+", text)
 
 
+def extract_html_text(html: str) -> str:
+    """Extract readable article text from an HTML document."""
+    document = Document(html)
+    soup = BeautifulSoup(document.summary(html_partial=True), "html.parser")
+    paragraphs = [
+        node.get_text(" ", strip=True)
+        for node in soup.find_all(["p", "li", "h1", "h2", "h3"])
+    ]
+    text = "\n\n".join(part for part in paragraphs if part)
+
+    if not text.strip():
+        plain_soup = BeautifulSoup(html, "html.parser")
+        for tag in plain_soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = plain_soup.get_text(" ", strip=True)
+
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def extract_article(url: str) -> dict:
     response = requests.get(
         url,
@@ -68,18 +87,11 @@ def extract_article(url: str) -> dict:
     soup_for_title = BeautifulSoup(html, "html.parser")
     html_title = soup_for_title.title.string.strip() if soup_for_title.title and soup_for_title.title.string else None
     title = document.short_title() or html_title or url
-    summary_html = document.summary(html_partial=True)
-    soup = BeautifulSoup(summary_html, "html.parser")
-    paragraphs = [node.get_text(" ", strip=True) for node in soup.find_all(["p", "li", "h1", "h2", "h3"])]
-    text = "\n\n".join(part for part in paragraphs if part)
-
-    if not text.strip():
-        plain_soup = BeautifulSoup(html, "html.parser")
-        text = plain_soup.get_text(" ", strip=True)
+    text = extract_html_text(html)
 
     return {
         "title": title.strip(),
-        "text": re.sub(r"\n{3,}", "\n\n", text).strip(),
+        "text": text,
         "canonical_uri": normalize_url(url),
         "metadata": {"fetch_url": url},
         "raw_text": html,

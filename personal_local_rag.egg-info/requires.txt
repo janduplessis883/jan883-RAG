@@ -1,11 +1,13 @@
 beautifulsoup4>=4.12.3
+fastapi<1,>=0.115.0
 notionhelper>=0.6.4
 readability-lxml>=0.8.1
 requests>=2.32.3
-streamlit>=1.44.0
+streamlit>=1.56.0
 pypdf>=4.2.0
 sqlite-vec>=0.1.6
 langfuse>=3.3.1
 loguru>=0.7.3
 rich>=14.0.0
+uvicorn[standard]<1,>=0.34.0
 watchfiles>=1.1.0
