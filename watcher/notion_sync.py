@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import fcntl
 import sys
 import time
 
@@ -20,10 +21,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from local_rag.config import ConfigManager
 from local_rag.database import Database
 from local_rag.ingestion import IngestionService
+from local_rag.calendar import NotionCalendarService
 
 
 NOTION_DATA_SOURCE_ID = "f07c5456-62e7-4589-848d-d87fca9a483c"
-SYNC_INTERVAL_SECONDS = 10 * 60
+SYNC_INTERVAL_SECONDS = 60 * 60
 LOG_FILE = PROJECT_ROOT / "logs/notion-sync.log"
 SYNC_TAGS = ["email", "work"]
 NOTION_API_BASE = "https://api.notion.com/v1"
@@ -49,6 +51,8 @@ def sync_once(ingestion: IngestionService) -> dict:
     result = ingestion.ingest_notion_data_source(
         data_source_id=NOTION_DATA_SOURCE_ID,
     )
+    calendar_result = sync_calendar_once(ingestion.config_manager, ingestion.database, ingestion)
+    result["calendar"] = calendar_result
 
     notion = NotionHelper(
         notion_token=ingestion.config["notion"]["api_token"],
@@ -105,6 +109,25 @@ def sync_once(ingestion: IngestionService) -> dict:
     return result
 
 
+def sync_calendar_once(config_manager, database, ingestion, *, full_sync=False, progress_callback=None) -> dict:
+    lock_path = PROJECT_ROOT / "data/notion_calendar_sync.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"status": "skipped", "message": "Another calendar sync is already running."}
+        calendar = NotionCalendarService(config_manager, database, ingestion)
+        result = calendar.sync(full_sync=full_sync, progress_callback=progress_callback)
+        database.record_operation("sync:notion_calendar", result)
+        return result
+
+
+def _sync_interval_seconds(config_manager) -> int:
+    minutes = int(config_manager.load_merged().get("notion", {}).get("sync_interval_minutes", 60))
+    return max(minutes, 1) * 60
+
+
 def run_sync() -> None:
     console = Console()
     configure_logging()
@@ -114,11 +137,12 @@ def run_sync() -> None:
     database = Database(config)
     database.initialize()
     ingestion = IngestionService(config, database)
+    sync_interval_seconds = _sync_interval_seconds(config)
 
     console.print(
         Panel.fit(
             f"[bold cyan]Notion data source:[/bold cyan] {NOTION_DATA_SOURCE_ID}\n"
-            f"[bold cyan]Interval:[/bold cyan] every {SYNC_INTERVAL_SECONDS // 60} minutes\n"
+            f"[bold cyan]Interval:[/bold cyan] every {sync_interval_seconds // 60} minutes\n"
             f"[bold cyan]Log file:[/bold cyan] {LOG_FILE}\n"
             "[dim]Press Ctrl+C to stop.[/dim]",
             title="Local Notion → RAG sync",
@@ -128,7 +152,7 @@ def run_sync() -> None:
     logger.info(
         "Notion sync started: data_source={data_source} interval_seconds={interval}",
         data_source=NOTION_DATA_SOURCE_ID,
-        interval=SYNC_INTERVAL_SECONDS,
+        interval=sync_interval_seconds,
     )
 
     try:
@@ -136,6 +160,7 @@ def run_sync() -> None:
             started = time.monotonic()
             try:
                 result = sync_once(ingestion)
+                sync_interval_seconds = _sync_interval_seconds(config)
                 logger.info(
                     "Sync completed: ingested={ingested} duplicates={duplicates} "
                     "errors={errors} notion_updates={notion_updates} pages={pages}",
@@ -145,6 +170,9 @@ def run_sync() -> None:
                     notion_updates=result.get("notion_updates", 0),
                     pages=result.get("page_count", 0),
                 )
+                calendar_result = result.get("calendar", {})
+                if calendar_result.get("error_details"):
+                    logger.error("Calendar item failures: {errors}", errors=calendar_result["error_details"])
                 console.print(
                     f"[green]SYNC COMPLETE[/green] "
                     f"{result.get('ingested', 0)} ingested, "
@@ -158,7 +186,7 @@ def run_sync() -> None:
                 console.print(f"[bold red]SYNC FAILED[/bold red] {exc}")
 
             elapsed = time.monotonic() - started
-            time.sleep(max(0, SYNC_INTERVAL_SECONDS - elapsed))
+            time.sleep(max(0, sync_interval_seconds - elapsed))
     except KeyboardInterrupt:
         console.print("\n[yellow]Notion sync stopped.[/yellow]")
         logger.info("Notion sync stopped by user")

@@ -124,3 +124,14 @@ def test_chat_answer_stream_yields_incremental_text(tmp_path):
     answer = "".join(service.answer_stream("What happened?", "test", sources=sources))
 
     assert answer == "The answer arrives in pieces."
+
+
+def test_chat_retrieval_scopes_to_selected_knowledge_sources(tmp_path):
+    service, database = make_service(tmp_path)
+    chat = ChatService(FakeConfig(tmp_path), service)
+    chat.retrieval_service.rank_candidates = lambda query, hybrid=None, source_ids=None: [
+        {"id": 1, "source_id": 1, "chunk_index": 0, "text": "knowledge", "title": "Knowledge", "source_type": "text", "canonical_uri": None, "rrf_score": 1.0, "similarity": 1.0, "lexical_score": None}
+    ] if source_ids else []
+    database.active_source_ids = lambda include_calendar=True: [1]
+    assert chat.retrieve_sources("question", include_knowledge_base=True, include_calendar=False)
+    assert chat.retrieve_sources("question", include_knowledge_base=False, include_calendar=False) == []

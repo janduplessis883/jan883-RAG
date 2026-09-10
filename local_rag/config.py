@@ -57,6 +57,7 @@ enabled = true
 request_timeout_seconds = 30
 data_source_preview_limit = 200
 max_child_page_depth = 3
+sync_interval_minutes = 60
 """
 
 DEFAULT_SECRETS = """[telegram]

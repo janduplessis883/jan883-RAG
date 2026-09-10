@@ -62,6 +62,10 @@ class SearchService:
             if len(selected) >= limit:
                 break
         self.expand_context(selected)
+        calendar = {item["source_id"]: item for item in self.database.list_calendar_events()}
+        for record in selected:
+            if record.get("source_id") in calendar:
+                record["calendar_event"] = calendar[record["source_id"]]
         return selected
 
     def expand_context(self, results: list[dict]) -> list[dict]:

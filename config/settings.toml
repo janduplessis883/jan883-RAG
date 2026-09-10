@@ -50,3 +50,5 @@ enabled = true
 request_timeout_seconds = 30
 data_source_preview_limit = 200
 max_child_page_depth = 3
+calendar_data_source_id = "303fdfd6-8a97-80f6-bbcc-000b5fe219ab"
+sync_interval_minutes = 5

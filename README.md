@@ -126,13 +126,13 @@ LaunchAgent stdout and stderr are written to `logs/folder-watcher.stdout.log` an
 
 ## Local Notion-to-RAG sync
 
-The Notion email archive can be synced into the local RAG database every 10 minutes:
+The Notion email archive and calendar can be synced into the local RAG database every hour:
 
 ```bash
 make sync-notion
 ```
 
-The worker runs one sync immediately, then repeats every 10 minutes. It uses the
+The worker runs one sync immediately, then repeats every hour. It uses the
 Notion data source `f07c5456-62e7-4589-848d-d87fca9a483c`, ingests page text only,
 and skips pages already present in the local database. PDF and other attachments
 are deliberately not downloaded or ingested yet.

@@ -9,7 +9,12 @@ st.caption("Find passages and narrow your search to the documents that matter.")
 render_runtime_sidebar()
 _, database, _, retrieval, _, _ = runtime()
 saved = json.loads(database.get_state("search_preferences") or "{}")
-rows = database.library_sources()
+try:
+    rows = database.library_sources(include_calendar=True)
+except TypeError:
+    # Allow a Streamlit process that has not reloaded local_rag.database yet to
+    # render the page while its file watcher catches up.
+    rows = database.library_sources()
 all_tags = sorted({tag for row in rows for tag in row["tags"]})
 all_types = sorted({row["source_type"] for row in rows})
 with st.form("search"):
@@ -19,9 +24,12 @@ with st.form("search"):
     types = right.multiselect("Document types", all_types, default=[t for t in saved.get("types", []) if t in all_types])
     dates = st.date_input("Date added", value=tuple(date.fromisoformat(d) for d in saved.get("dates", [])))
     limit = st.slider("Results", min_value=3, max_value=20, value=saved.get("limit", 8))
+    include_calendar = st.toggle("Include calendar events", value=saved.get("include_calendar", True),
+                                 help="Include Notion calendar events in retrieval results.")
     submitted = st.form_submit_button("Search", icon=":material/search:", type="primary")
 if submitted:
-    saved = dict(query=query, tags=tags, types=types, dates=[str(d) for d in dates], limit=limit)
+    saved = dict(query=query, tags=tags, types=types, dates=[str(d) for d in dates], limit=limit,
+                 include_calendar=include_calendar)
     database.set_state("search_preferences", json.dumps(saved))
     if not query.strip():
         st.warning("Enter a question or search phrase.")
@@ -30,7 +38,15 @@ if submitted:
                                 end=dates[1] if len(dates) == 2 else None)
         try:
             with st.spinner("Searching your documents..."):
-                results = retrieval.search(query=query, limit=limit, source_ids=[r["id"] for r in scoped]) if scoped else []
+                source_ids = [r["id"] for r in scoped if r["source_type"] != "notion_calendar"]
+                if include_calendar:
+                    if hasattr(database, "calendar_source_ids"):
+                        source_ids.extend(database.calendar_source_ids())
+                    else:
+                        source_ids.extend(row[0] for row in database.connection.execute(
+                            "SELECT source_id FROM notion_calendar"
+                        ))
+                results = retrieval.search(query=query, limit=limit, source_ids=list(dict.fromkeys(source_ids))) if source_ids else []
             database.set_state("search_results", json.dumps({"query": query, "results": results}))
         except Exception:
             st.error("Search could not reach the model service. Check Health and submit again. Previous results are kept below.")

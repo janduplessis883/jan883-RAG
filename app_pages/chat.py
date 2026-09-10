@@ -95,6 +95,14 @@ with st.sidebar:
                                help="Explore related wording before retrieving passages. Adds a model call.")
         hybrid = st.toggle("Hybrid retrieval", value=bool(merged["retrieval"].get("hybrid_enabled", True)),
                            help="Combine keyword and semantic matches.")
+        chat_sources = st.multiselect(
+            "Chat with",
+            options=["Knowledge Base", "Calendar"],
+            default=["Knowledge Base", "Calendar"],
+            help="Choose which sources should be searched for this conversation.",
+        )
+        include_knowledge_base = "Knowledge Base" in chat_sources
+        include_calendar = "Calendar" in chat_sources
         render_runtime_details()
 
 messages = st.session_state["chat_messages"]
@@ -157,6 +165,8 @@ if prompt:
                             related_questions=related,
                             source_limit=source_limit,
                             hybrid=hybrid,
+                            include_calendar=include_calendar,
+                            include_knowledge_base=include_knowledge_base,
                         )
                         status.update(
                             label=f"Found {len(sources)} supporting passages",

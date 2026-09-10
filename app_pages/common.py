@@ -16,6 +16,9 @@ def runtime():
 
 def source_link(canonical_uri: str) -> str:
     match = re.fullmatch(r"notion://page/([0-9a-fA-F-]+)", canonical_uri)
+    if match:
+        return f"https://app.notion.com/p/{match.group(1).replace('-', '')}?source=copy_link"
+    match = re.fullmatch(r"notion://calendar/([0-9a-fA-F-]+)", canonical_uri or "")
     return f"https://app.notion.com/p/{match.group(1).replace('-', '')}?source=copy_link" if match else canonical_uri
 
 
@@ -56,8 +59,19 @@ def _tag_badge_color(tag: str) -> str:
     return TAG_BADGE_COLORS[sum(map(ord, tag.lower())) % len(TAG_BADGE_COLORS)]
 
 
+def display_source_title(item) -> str:
+    calendar_event = item.get("calendar_event")
+    if calendar_event:
+        return f"Calendar - {calendar_event.get('event') or item.get('title', 'Event')}"
+    return item.get("title", "Untitled source")
+
+
 def render_source_content(item, *, markdown=False, tags_as_badges=False):
     st.caption(f"{item['source_type']} · Passage {item.get('chunk_index', 0) + 1}")
+    calendar_event = item.get("calendar_event")
+    if calendar_event:
+        end = calendar_event.get("end_date") or "not specified"
+        st.caption(f"Start: {calendar_event.get('start_date', 'not specified')} · End: {end}")
     uri = item.get("canonical_uri")
     if uri and source_link(uri).startswith(("https://", "http://")):
         st.link_button("Open original", source_link(uri), icon=":material/open_in_new:")
@@ -80,7 +94,7 @@ def render_search_results(results):
         return
     for index, item in enumerate(results, 1):
         with st.container(border=True):
-            st.subheader(item["title"])
+            st.subheader(display_source_title(item))
             st.caption(f"[S{index}] · {item['source_type']}")
             st.write(item.get("preview", item.get("text", "")[:800]))
             with st.expander("Read full supporting passage", icon=":material/menu_book:"):
@@ -96,8 +110,9 @@ def render_chat_sources(sources):
     st.caption("Verify an answer: open the matching citation below. Passages are saved with this conversation.")
     with st.container(horizontal=True):
         for index, item in enumerate(sources, 1):
-            with st.popover(f"[S{index}] {item['title'][:45]}"):
-                st.markdown(f"**{item['title']}**")
+            title = display_source_title(item)
+            with st.popover(f"[S{index}] {title[:45]}"):
+                st.markdown(f"**{title}**")
                 render_source_content(item, markdown=True, tags_as_badges=True)
 
 

@@ -279,6 +279,7 @@ class IngestionService:
         external_ref: str | None = None,
         metadata: dict | None = None,
         chunking: dict | None = None,
+        allow_duplicate_content: bool = False,
     ) -> dict:
         return self._store_document(
             source_type=source_type,
@@ -292,6 +293,7 @@ class IngestionService:
             raw_binary=None,
             raw_binary_name=None,
             chunking=chunking,
+            allow_duplicate_content=allow_duplicate_content,
         )
 
     def ingest_file(
@@ -693,13 +695,14 @@ class IngestionService:
         raw_binary: bytes | None,
         raw_binary_name: str | None,
         chunking: dict | None = None,
+        allow_duplicate_content: bool = False,
     ) -> dict:
         clean_text = text.strip()
         if not clean_text:
             raise ValueError("Extracted content is empty.")
 
-        content_hash = sha256_text(clean_text)
-        duplicate = self.database.find_duplicate(canonical_uri, content_hash)
+        content_hash = sha256_text(clean_text + (f"\n{canonical_uri}" if allow_duplicate_content and canonical_uri else ""))
+        duplicate = self.database.find_source_by_uri(canonical_uri) if allow_duplicate_content else self.database.find_duplicate(canonical_uri, content_hash)
         if duplicate:
             existing_source = self.database.get_source(int(duplicate["id"]))
             if existing_source and existing_source["deleted_at"]:

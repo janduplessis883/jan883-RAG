@@ -139,8 +139,8 @@ with st.container(border=True):
             st.success("API stopped.")
 
 st.subheader("Last successful sync")
-cols = st.columns(3)
-for col, kind, label in zip(cols, ("sync:notion", "sync:telegram", "sync:folder"), ("Notion", "Telegram", "Folder watcher")):
+cols = st.columns(4)
+for col, kind, label in zip(cols, ("sync:notion", "sync:notion_calendar", "sync:telegram", "sync:folder"), ("Notion email", "Notion calendar", "Telegram", "Folder watcher")):
     latest = database.last_successful_operation(kind)
     with col.container(border=True):
         st.write(f"**{label}**")

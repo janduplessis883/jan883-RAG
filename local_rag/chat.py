@@ -44,7 +44,7 @@ class ChatService:
                 generation,
                 {
                     "related_questions_count": len(raw),
-                    "usage": self.ollama.last_usage or {},
+                    "usage": getattr(self.ollama, "last_usage", None) or {},
                 },
             )
         try:
@@ -77,6 +77,8 @@ class ChatService:
         related_questions: list[str] | None = None,
         source_limit: int | None = None,
         hybrid: bool | None = None,
+        include_calendar: bool = True,
+        include_knowledge_base: bool = True,
     ) -> list[dict]:
         retrieval = self.config["retrieval"]
         limit = int(source_limit or retrieval.get("max_context_chunks", 8))
@@ -84,6 +86,16 @@ class ChatService:
         dedupe_by_source = bool(retrieval.get("dedupe_by_source", False))
 
         queries = list(dict.fromkeys([question, *(related_questions or [])]))
+        if include_knowledge_base and include_calendar:
+            source_ids = self.retrieval_service.database.active_source_ids(include_calendar=True)
+        elif include_knowledge_base:
+            source_ids = self.retrieval_service.database.active_source_ids(include_calendar=False)
+        elif include_calendar:
+            source_ids = self.retrieval_service.database.calendar_source_ids()
+        else:
+            source_ids = []
+        if not source_ids:
+            return []
         # Fuse at the rank level with RRF across the per-query result lists: a chunk
         # ranking #1 in three queries now out-scores one ranking #1 in a single query,
         # and no per-query top_k/dedupe/min_similarity truncation happens beforehand.
@@ -95,7 +107,10 @@ class ChatService:
             fused: dict[int, dict] = {}
             for query in queries:
                 for rank, record in enumerate(
-                    self.retrieval_service.rank_candidates(query, hybrid=hybrid), start=1
+                    self.retrieval_service.rank_candidates(
+                        query, hybrid=hybrid,
+                        source_ids=source_ids,
+                    ), start=1
                 ):
                     combined = fused.get(record["id"])
                     if combined is None:
@@ -178,7 +193,7 @@ class ChatService:
                 {
                     "answer_length": len(answer),
                     "source_count": len(sources or []),
-                    "usage": self.ollama.last_usage or {},
+                    "usage": getattr(self.ollama, "last_usage", None) or {},
                 },
             )
 
@@ -203,11 +218,25 @@ class ChatService:
                 f"URI: {source['canonical_uri'] or 'local-only'}\n"
                 f"Excerpt: {source['text']}\n"
             )
+            if source.get("calendar_event"):
+                event = source["calendar_event"]
+                block += (
+                    "Structured calendar record (fresh from SQLite):\n"
+                    f"Event: {event['event']}\nStart: {event['start_date']}\n"
+                    f"End: {event.get('end_date') or 'not specified'}\n"
+                    f"Description: {event['description']}\n"
+                    f"Location: {event.get('location') or 'not specified'}\n"
+                    f"Attendees: {', '.join(event.get('attendees') or []) or 'not specified'}\n"
+                )
             context_blocks.append(block)
 
         today = datetime.now().date().isoformat()
         system_prompt = (
             f"Today's date is {today}. "
+            "Use UK English date and time formatting in every answer: format dates as D Mon YYYY "
+            "and times using the 24-hour clock, for example ‘22 Sept 2026 13:25’. "
+            "Interpret and present calendar times in the Europe/London timezone unless the context "
+            "explicitly states another timezone. "
             "You answer questions using only the provided knowledge base context. "
             "Be concise, grounded, and cite claims using source labels like [S1]. "
             "If the answer is uncertain, say so clearly."

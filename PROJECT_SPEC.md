@@ -37,7 +37,7 @@ Implemented and working:
 - Removal of the repeated NHS Mail signature/footer and repeated-asterisk footer.
 - Notion email archive database and data source.
 - Upload of all email attachments to the Notion `Attachments` Files & Media property.
-- Local Notion-to-RAG worker, running as a macOS LaunchAgent every 10 minutes.
+- Local Notion-to-RAG worker, running as a macOS LaunchAgent every hour.
 - Notion `Ingested` checkbox updates after successful or already-known page ingestion.
 - First local Notion sync completed successfully: 11 pages ingested, 0 duplicates, 0 errors.
 
@@ -298,7 +298,7 @@ The worker currently defines:
 
 ```python
 NOTION_DATA_SOURCE_ID = "f07c5456-62e7-4589-848d-d87fca9a483c"
-SYNC_INTERVAL_SECONDS = 10 * 60
+SYNC_INTERVAL_SECONDS = 60 * 60
 ```
 
 The data source ID is intentionally explicit in the worker for now. If multiple environments are introduced, move it into configuration or an environment variable.

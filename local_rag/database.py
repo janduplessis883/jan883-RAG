@@ -132,6 +132,21 @@ class Database:
         self.connection.execute("""CREATE TABLE IF NOT EXISTS operation_runs (
             id INTEGER PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
             details_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        self.connection.execute("""CREATE TABLE IF NOT EXISTS notion_calendar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            notion_page_id TEXT NOT NULL UNIQUE,
+            source_id INTEGER NOT NULL UNIQUE REFERENCES sources(id) ON DELETE CASCADE,
+            event TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL,
+            end_date TEXT, timezone TEXT, attendees_json TEXT NOT NULL DEFAULT '[]', location TEXT,
+            tags_json TEXT NOT NULL DEFAULT '[]', completed INTEGER NOT NULL DEFAULT 0,
+            blocked_by_json TEXT NOT NULL DEFAULT '[]', blocking_json TEXT NOT NULL DEFAULT '[]',
+            teams_link TEXT, created_time TEXT, last_edited_time TEXT,
+            created_by_json TEXT, last_edited_by_json TEXT, rag_id TEXT,
+            raw_json TEXT NOT NULL DEFAULT '{}', synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        calendar_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(notion_calendar)")}
+        if "rag_id" not in calendar_columns:
+            self.connection.execute("ALTER TABLE notion_calendar ADD COLUMN rag_id TEXT")
 
         if self.sqlite_vec:
             self.connection.execute(
@@ -166,6 +181,11 @@ class Database:
             "SELECT * FROM sources WHERE canonical_uri = ?",
             (canonical_uri,),
         ).fetchone()
+
+    @staticmethod
+    def hash_text(text: str) -> str:
+        import hashlib
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     @synchronized
     def insert_source(
@@ -563,10 +583,11 @@ class Database:
         return list(values)
 
     @synchronized
-    def library_sources(self, *, removed: bool = False) -> list[dict]:
+    def library_sources(self, *, removed: bool = False, include_calendar: bool = False) -> list[dict]:
+        calendar_filter = "" if include_calendar else " AND source_type != 'notion_calendar'"
         rows = self.connection.execute(
             "SELECT id, title, source_type, tags_json, created_at, updated_at, canonical_uri "
-            "FROM sources WHERE deleted_at IS " + ("NOT NULL" if removed else "NULL") +
+            "FROM sources WHERE deleted_at IS " + ("NOT NULL" if removed else "NULL") + calendar_filter +
             " ORDER BY created_at DESC, id DESC"
         ).fetchall()
         return [{**dict(row), "tags": json.loads(row["tags_json"])} for row in rows]
@@ -628,6 +649,85 @@ class Database:
                 "WHERE id=? AND deleted_at IS NULL",
                 (json.dumps(tags), source_id),
             )
+
+    @synchronized
+    def update_source_metadata(self, source_id: int, metadata: dict) -> None:
+        with self.connection:
+            self.connection.execute("UPDATE sources SET metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                                    (json.dumps(metadata), source_id))
+
+    @synchronized
+    def upsert_calendar_event(self, event, source_id: int) -> None:
+        values = (event.page_id, source_id, event.event, event.description, event.start_date, event.end_date,
+                  event.timezone, json.dumps(event.attendees), event.location, json.dumps(event.tags), int(event.completed),
+                  json.dumps(event.blocked_by), json.dumps(event.blocking), event.teams_link, event.created_time,
+                  event.last_edited_time, json.dumps(event.created_by), json.dumps(event.last_edited_by), event.rag_id, json.dumps(event.raw_json))
+        with self.connection:
+            self.connection.execute("""INSERT INTO notion_calendar(
+                notion_page_id, source_id, event, description, start_date, end_date, timezone,
+                attendees_json, location, tags_json, completed, blocked_by_json, blocking_json,
+                teams_link, created_time, last_edited_time, created_by_json, last_edited_by_json, rag_id, raw_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(notion_page_id) DO UPDATE SET source_id=excluded.source_id, event=excluded.event,
+                description=excluded.description, start_date=excluded.start_date, end_date=excluded.end_date,
+                timezone=excluded.timezone, attendees_json=excluded.attendees_json, location=excluded.location,
+                tags_json=excluded.tags_json, completed=excluded.completed, blocked_by_json=excluded.blocked_by_json,
+                blocking_json=excluded.blocking_json, teams_link=excluded.teams_link, created_time=excluded.created_time,
+                last_edited_time=excluded.last_edited_time, created_by_json=excluded.created_by_json,
+                last_edited_by_json=excluded.last_edited_by_json, rag_id=excluded.rag_id, raw_json=excluded.raw_json, synced_at=CURRENT_TIMESTAMP""", values)
+
+    @synchronized
+    def calendar_page_ids(self) -> set[str]:
+        return {row[0] for row in self.connection.execute("SELECT notion_page_id FROM notion_calendar")}
+
+    @synchronized
+    def calendar_source_ids(self) -> list[int]:
+        return [int(row[0]) for row in self.connection.execute(
+            "SELECT source_id FROM notion_calendar JOIN sources ON sources.id=source_id WHERE sources.deleted_at IS NULL")]
+
+    @synchronized
+    def active_source_ids(self, include_calendar: bool = True) -> list[int]:
+        where = "" if include_calendar else " AND source_type != 'notion_calendar'"
+        return [int(row[0]) for row in self.connection.execute(
+            "SELECT id FROM sources WHERE deleted_at IS NULL" + where)]
+
+    @synchronized
+    def list_calendar_events(self, source_ids: list[int] | None = None) -> list[dict]:
+        scope = "" if source_ids is None else " WHERE source_id IN (" + ",".join("?" for _ in source_ids) + ")"
+        rows = self.connection.execute("SELECT * FROM notion_calendar" + scope + " ORDER BY start_date", tuple(source_ids or [])).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for field in ("attendees_json", "tags_json", "blocked_by_json", "blocking_json", "created_by_json", "last_edited_by_json", "raw_json"):
+                item[field.removesuffix("_json")] = json.loads(item.pop(field) or ("{}" if field in {"created_by_json", "last_edited_by_json", "raw_json"} else "[]"))
+            result.append(item)
+        return result
+
+    @synchronized
+    def delete_calendar_event(self, notion_page_id: str) -> None:
+        with self.connection:
+            row = self.connection.execute("SELECT source_id FROM notion_calendar WHERE notion_page_id=?", (notion_page_id,)).fetchone()
+            if not row:
+                return
+            source_id = int(row[0])
+            chunk_ids = [r[0] for r in self.connection.execute("SELECT id FROM chunks WHERE source_id=?", (source_id,))]
+            if self.sqlite_vec:
+                for chunk_id in chunk_ids:
+                    self.connection.execute("DELETE FROM chunk_index WHERE rowid=?", (chunk_id,))
+            if self.fts5:
+                fts_rows = self.connection.execute(
+                    "SELECT chunks.id, sources.title, chunks.text FROM chunks JOIN sources ON sources.id=chunks.source_id WHERE chunks.source_id=?",
+                    (source_id,),
+                ).fetchall()
+                for fts_row in fts_rows:
+                    self.connection.execute(
+                        "INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES('delete', ?, ?)",
+                        (fts_row["id"], self._fts_index_text(fts_row["title"] or "", fts_row["text"] or "")),
+                    )
+            self.connection.execute("DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE source_id=?)", (source_id,))
+            self.connection.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
+            self.connection.execute("DELETE FROM notion_calendar WHERE notion_page_id=?", (notion_page_id,))
+            self.connection.execute("DELETE FROM sources WHERE id=?", (source_id,))
 
     @synchronized
     def save_conversation(self, conversation_id: str, messages: list[dict]) -> None:
