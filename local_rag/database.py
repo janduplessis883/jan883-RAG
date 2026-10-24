@@ -148,10 +148,27 @@ class Database:
         if "rag_id" not in calendar_columns:
             self.connection.execute("ALTER TABLE notion_calendar ADD COLUMN rag_id TEXT")
 
+        self.connection.execute("""CREATE TABLE IF NOT EXISTS notion_contacts (
+            notion_page_id TEXT PRIMARY KEY,
+            notion_data_source_id TEXT NOT NULL,
+            source_id INTEGER NOT NULL UNIQUE REFERENCES sources(id) ON DELETE CASCADE,
+            name TEXT NOT NULL, address TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '', email_normalized TEXT NOT NULL DEFAULT '',
+            tel TEXT NOT NULL DEFAULT '', tel_normalized TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+            attachments_json TEXT NOT NULL DEFAULT '[]', notion_url TEXT NOT NULL,
+            created_time TEXT, last_edited_time TEXT, raw_json TEXT NOT NULL DEFAULT '{}',
+            synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_contacts_email ON notion_contacts(email_normalized)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_contacts_tel ON notion_contacts(tel_normalized)")
+
         if self.sqlite_vec:
             self.connection.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_index USING vec0(embedding float[{embedding_dimensions}])"
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_index USING vec0(embedding float[{embedding_dimensions}], source_id integer)"
             )
+            columns = {row[1] for row in self.connection.execute("PRAGMA table_info(chunk_index)")}
+            if "source_id" not in columns:
+                self.rebuild_vector_index()
 
         if self.fts5:
             self.connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(text, content='')")
@@ -160,6 +177,13 @@ class Database:
             if fts_count != chunk_count:
                 self.rebuild_fts_index()
         self.connection.commit()
+        stored_model = self.get_state("embedding_model")
+        stored_dimensions = self.get_state("embedding_dimensions")
+        configured_model = self.config["ollama"].get("embedding_model", "unknown")
+        if stored_model and (stored_model != configured_model or int(stored_dimensions or 0) != embedding_dimensions):
+            raise ValueError("The embedding model or dimensions changed; re-embed documents before searching.")
+        self.set_state("embedding_model", configured_model)
+        self.set_state("embedding_dimensions", str(embedding_dimensions))
 
     @synchronized
     def find_duplicate(self, canonical_uri: str | None, content_hash: str) -> sqlite3.Row | None:
@@ -202,6 +226,7 @@ class Database:
         metadata: dict[str, Any],
         raw_text_path: str | None,
         raw_binary_path: str | None,
+        commit: bool = True,
     ) -> int:
         cursor = self.connection.execute(
             """
@@ -224,7 +249,8 @@ class Database:
                 raw_binary_path,
             ),
         )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
         return int(cursor.lastrowid)
 
     _ISO_DATE_RE = re.compile(r"(\d{4})[-/](\d{2})[-/](\d{2})")
@@ -273,8 +299,8 @@ class Database:
             )
             if self.sqlite_vec:
                 self.connection.execute(
-                    "INSERT INTO chunk_index (rowid, embedding) VALUES (?, ?)",
-                    (chunk_id, self.sqlite_vec.serialize_float32(embedding)),
+                    "INSERT INTO chunk_index (rowid, embedding, source_id) VALUES (?, ?, ?)",
+                    (chunk_id, self.sqlite_vec.serialize_float32(embedding), source_id),
                 )
             if self.fts5:
                 self.connection.execute(
@@ -287,11 +313,18 @@ class Database:
 
     @synchronized
     def search_candidates(self, query_embedding: list[float], limit: int, source_ids: list[int] | None = None) -> list[tuple[int, float]]:
-        if self.sqlite_vec and source_ids is None:
+        if self.sqlite_vec:
             try:
+                scope = ""
+                params: list[Any] = [self.sqlite_vec.serialize_float32(query_embedding)]
+                if source_ids is not None:
+                    if not source_ids:
+                        return []
+                    scope = " AND source_id IN (" + ",".join("?" for _ in source_ids) + ")"
+                    params.extend(source_ids)
                 rows = self.connection.execute(
-                    "SELECT rowid, distance FROM chunk_index WHERE embedding MATCH ? AND k = ?",
-                    (self.sqlite_vec.serialize_float32(query_embedding), limit + int(self.connection.execute("SELECT COUNT(*) FROM chunks JOIN sources ON sources.id = chunks.source_id WHERE sources.deleted_at IS NOT NULL").fetchone()[0])),
+                    f"SELECT rowid, distance FROM chunk_index WHERE embedding MATCH ? AND k = ?{scope}",
+                    (params[0], limit, *params[1:]),
                 ).fetchall()
                 candidate_ids = [int(row["rowid"]) for row in rows]
                 return self._rerank_candidates(candidate_ids, query_embedding)
@@ -564,13 +597,13 @@ class Database:
         self.connection.execute("DROP TABLE IF EXISTS chunk_index")
         dimensions = int(self.config["ollama"]["embedding_dimensions"])
         self.connection.execute(
-            f"CREATE VIRTUAL TABLE chunk_index USING vec0(embedding float[{dimensions}])"
+            f"CREATE VIRTUAL TABLE chunk_index USING vec0(embedding float[{dimensions}], source_id integer)"
         )
-        rows = self.connection.execute("SELECT chunk_id, embedding FROM chunk_vectors ORDER BY chunk_id").fetchall()
+        rows = self.connection.execute("SELECT chunk_id, source_id, embedding FROM chunk_vectors JOIN chunks ON chunks.id = chunk_id ORDER BY chunk_id").fetchall()
         for row in rows:
             self.connection.execute(
-                "INSERT INTO chunk_index (rowid, embedding) VALUES (?, ?)",
-                (int(row["chunk_id"]), self.sqlite_vec.serialize_float32(self._unpack_embedding(row["embedding"]))),
+                "INSERT INTO chunk_index (rowid, embedding, source_id) VALUES (?, ?, ?)",
+                (int(row["chunk_id"]), self.sqlite_vec.serialize_float32(self._unpack_embedding(row["embedding"])), int(row["source_id"])),
             )
         self.connection.commit()
 
@@ -686,10 +719,97 @@ class Database:
             "SELECT source_id FROM notion_calendar JOIN sources ON sources.id=source_id WHERE sources.deleted_at IS NULL")]
 
     @synchronized
-    def active_source_ids(self, include_calendar: bool = True) -> list[int]:
+    def active_source_ids(self, include_calendar: bool = True, include_contacts: bool = True) -> list[int]:
         where = "" if include_calendar else " AND source_type != 'notion_calendar'"
+        if not include_contacts:
+            where += " AND source_type != 'notion_contact'"
         return [int(row[0]) for row in self.connection.execute(
             "SELECT id FROM sources WHERE deleted_at IS NULL" + where)]
+
+    @synchronized
+    def upsert_contact(self, contact, source_id: int, data_source_id: str) -> None:
+        from local_rag.contacts import normalize_phone
+        fields = ("name", "address", "description", "email", "tel", "url", "notion_url", "created_time", "last_edited_time")
+        values = {field: getattr(contact, field) for field in fields}
+        values.update(notion_page_id=contact.page_id, notion_data_source_id=data_source_id, source_id=source_id,
+                      email_normalized=contact.email.casefold(), tel_normalized=normalize_phone(contact.tel),
+                      attachments_json=json.dumps(contact.attachments), raw_json=json.dumps(contact.raw_json))
+        columns = list(values)
+        updates = ", ".join(f"{field}=excluded.{field}" for field in columns if field != "notion_page_id")
+        with self.connection:
+            self.connection.execute(
+                f"INSERT INTO notion_contacts ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
+                f"ON CONFLICT(notion_page_id) DO UPDATE SET {updates}, synced_at=CURRENT_TIMESTAMP",
+                tuple(values.values()),
+            )
+
+    @synchronized
+    def list_contacts(self, source_ids: list[int] | None = None, *, include_removed: bool = False,
+                      data_source_id: str | None = None) -> list[dict]:
+        if source_ids == []:
+            return []
+        clauses, params = [], []
+        if not include_removed:
+            clauses.append("sources.deleted_at IS NULL")
+        if source_ids is not None:
+            clauses.append("source_id IN (" + ",".join("?" for _ in source_ids) + ")")
+            params.extend(source_ids)
+        if data_source_id is not None:
+            clauses.append("notion_data_source_id=?")
+            params.append(data_source_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.connection.execute(
+            "SELECT notion_contacts.*, sources.deleted_at FROM notion_contacts JOIN sources ON sources.id=source_id" +
+            where + " ORDER BY name COLLATE NOCASE, notion_page_id", params).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            record['attachments'] = json.loads(record.pop('attachments_json'))
+            record['raw'] = json.loads(record.pop('raw_json'))
+            records.append(record)
+        return records
+
+    @synchronized
+    def contact_source_ids(self) -> list[int]:
+        return [row['source_id'] for row in self.list_contacts()]
+
+    @synchronized
+    def search_contacts(self, query: str, source_ids: list[int] | None = None) -> list[dict]:
+        from local_rag.contacts import contact_matches
+        return contact_matches(self.list_contacts(source_ids), query)
+
+    @synchronized
+    def update_contact_attachments(self, page_id: str, attachments: list[dict]) -> None:
+        with self.connection:
+            self.connection.execute("UPDATE notion_contacts SET attachments_json=? WHERE notion_page_id=?",
+                                    (json.dumps(attachments), page_id))
+
+    @synchronized
+    def search_calendar_events(self, window_start, window_end, source_ids: list[int] | None = None) -> list[dict]:
+        """Return calendar events overlapping a half-open datetime window."""
+        if source_ids == []:
+            return []
+        scope = "" if source_ids is None else " AND sources.id IN (" + ",".join("?" for _ in source_ids) + ")"
+        start = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
+        end = window_end.isoformat() if hasattr(window_end, "isoformat") else str(window_end)
+        end_value = "COALESCE(notion_calendar.end_date, notion_calendar.start_date)"
+        # Notion all-day dates are stored as YYYY-MM-DD. Treat them as ending at
+        # the end of that calendar day rather than at midnight.
+        end_value = f"datetime(CASE WHEN instr({end_value}, 'T') = 0 THEN {end_value} || 'T23:59:59' ELSE {end_value} END)"
+        rows = self.connection.execute(
+            f"""
+            SELECT notion_calendar.source_id
+            FROM notion_calendar
+            JOIN sources ON sources.id = notion_calendar.source_id
+            WHERE sources.deleted_at IS NULL
+              AND datetime(notion_calendar.start_date) < datetime(?)
+              AND {end_value} > datetime(?)
+              {scope}
+            ORDER BY datetime(notion_calendar.start_date)
+            """,
+            (end, start, *(source_ids or [])),
+        ).fetchall()
+        return self.list_calendar_events(source_ids=[int(row[0]) for row in rows]) if rows else []
 
     @synchronized
     def list_calendar_events(self, source_ids: list[int] | None = None) -> list[dict]:

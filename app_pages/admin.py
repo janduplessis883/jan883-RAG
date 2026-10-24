@@ -6,68 +6,76 @@ from threading import Lock
 from app_pages.common import render_runtime_sidebar, runtime
 from app_pages.ingest_feedback import run_import, show_import
 from watcher.notion_sync import sync_calendar_once
+from app_pages.contact_sync import contacts_sync_panel
 
 
-_CALENDAR_EXECUTOR = ThreadPoolExecutor(max_workers=1)
-_CALENDAR_STATE = {"lock": Lock(), "completed": 0, "total": 0, "label": "", "result": None, "error": None}
+@st.cache_resource
+def _calendar_executor():
+    return ThreadPoolExecutor(max_workers=1)
 
 
 render_runtime_sidebar()
 config, database, ingestion, _, _, backup = runtime()
 
 
-def _run_full_calendar_sync():
+def _run_full_calendar_sync(config, database, ingestion, state):
+    # The worker must retain this session's job state across full-page reruns.
+    # It must never read Streamlit session state from its background thread.
     def progress(completed, total, label):
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE.update(completed=completed, total=total, label=label)
+        with state["lock"]:
+            state.update(completed=completed, total=total, label=label)
     try:
         result = sync_calendar_once(config, database, ingestion, full_sync=True, progress_callback=progress)
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE["result"] = result
+        with state["lock"]:
+            state["result"] = result
     except Exception as exc:
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE["error"] = str(exc)
+        with state["lock"]:
+            state["error"] = str(exc)
 
 
 @st.fragment(run_every="1s")
 def calendar_sync_panel():
-    with _CALENDAR_STATE["lock"]:
-        state = dict(_CALENDAR_STATE)
+    job = st.session_state.get("calendar_sync_state")
+    state = {}
+    if job is not None:
+        with job["lock"]:
+            state = dict(job)
     future = st.session_state.get("calendar_sync_future")
     running = future is not None and not future.done()
     if running:
-        completed = state["completed"]
-        total = state["total"]
+        completed = state.get("completed", 0)
+        total = state.get("total")
         remaining = max(total - completed, 0) if total else None
         progress_label = (
-            f"{remaining} events remaining — {state['label']}"
-            if remaining is not None and state["label"]
-            else f"{remaining} events remaining"
+            f"{completed} of {total} processed · {remaining} events remaining — {state.get('label', '')}"
             if remaining is not None
-            else "Counting calendar events…"
+            else state.get("label") or "Fetching calendar events…"
         )
         st.progress((completed / total) if total else 0, text=progress_label)
-    elif state["result"]:
+    elif state.get("result"):
         result = state["result"]
-        if result.get("errors"):
+        if result.get("status") == "skipped":
+            st.info(result["message"])
+        elif result.get("errors"):
+            st.progress(1.0, text="Calendar sync finished with item errors")
             st.warning(f"Calendar sync completed with {result['errors']} item errors: {result['upserted']} stored, {result['deleted']} deleted.")
             with st.expander("Calendar sync errors"):
                 st.json(result.get("error_details", []))
         else:
+            st.progress(1.0, text="Calendar sync complete")
             st.success(f"Calendar sync complete: {result['upserted']} stored, {result['deleted']} deleted.")
         st.session_state.pop("calendar_sync_future", None)
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE["result"] = None
-    elif state["error"]:
+    elif state.get("error"):
         st.error(f"Calendar sync failed: {state['error']}")
         st.session_state.pop("calendar_sync_future", None)
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE["error"] = None
 
     if st.button("Calendar master sync", icon=":material/calendar_month:", disabled=running):
-        with _CALENDAR_STATE["lock"]:
-            _CALENDAR_STATE.update(completed=0, total=0, label="", result=None, error=None)
-        st.session_state["calendar_sync_future"] = _CALENDAR_EXECUTOR.submit(_run_full_calendar_sync)
+        job = {"lock": Lock(), "completed": 0, "total": None,
+               "label": "Fetching calendar events…", "result": None, "error": None}
+        st.session_state["calendar_sync_state"] = job
+        st.session_state["calendar_sync_future"] = _calendar_executor().submit(
+            _run_full_calendar_sync, config, database, ingestion, job
+        )
         st.rerun()
 
 
@@ -77,7 +85,11 @@ st.caption("Maintenance tasks and local configuration.")
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("Notion calendar")
+    st.caption("Refreshes events from the past 30 days and all upcoming events.")
     calendar_sync_panel()
+    st.subheader("Notion contacts")
+    st.caption("Refreshes all contacts and their attachment links.")
+    contacts_sync_panel()
     if st.button("Poll Telegram", icon=":material/sync:"):
         with st.spinner("Polling Telegram updates..."):
             run_import("telegram", "sync_telegram")
@@ -108,7 +120,7 @@ with col2:
         max_value=1440,
         value=int(current_settings.get("notion", {}).get("sync_interval_minutes", 60)),
         step=1,
-        help="The watcher reads this interval between email and calendar sync cycles.",
+        help="The watcher reads this interval between email, calendar and contacts sync cycles.",
     )
     if st.button("Save sync frequency", icon=":material/schedule:"):
         settings_text = config.read_text(config.settings_path)

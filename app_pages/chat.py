@@ -1,68 +1,74 @@
 from uuid import uuid4
 import streamlit as st
 
-from app_pages.common import get_answer_models, render_chat_sources, render_runtime_details, runtime
+from app_pages.common import (
+    get_answer_models,
+    render_chat_sources,
+    render_runtime_details,
+    runtime,
+)
 from local_rag.presentation import export_conversation
 
 
 _, database, _, _, chat, _ = runtime()
 merged = chat.config
-st.html("""
-<div class="rag-banner" role="banner" aria-label="jan883-RAG">
-    <span>jan883-RAG</span>
-</div>
-<style>
-    .rag-banner {
-        align-items: center;
-        animation: rag-gradient 14s ease-in-out infinite;
-        background: linear-gradient(120deg, #252f3d 0%, #263b4d 48%, #3a5367 100%);
-        background-size: 200% 200%;
-        border: 1px solid rgba(255, 255, 255, 0.16);
-        border-radius: 16px;
-        box-shadow: 0 14px 28px rgba(17, 24, 39, 0.24);
-        box-sizing: border-box;
-        color: #ffffff;
-        display: flex;
-        min-height: 116px;
-        padding: 0.5rem 2.5rem;
-        transition: box-shadow 160ms ease, transform 160ms ease;
-        width: 100%;
-    }
+st.title("Chat with jan883-RAG :material/chat_dashed:")
+# st.html("""
+# <div class="rag-banner" role="banner" aria-label="jan883-RAG">
+#     <span>jan883-RAG</span>
+# </div>
+# <style>
+#     .rag-banner {
+#         align-items: center;
+#         animation: rag-gradient 14s ease-in-out infinite;
+#         background: linear-gradient(120deg, #252f3d 0%, #263b4d 48%, #3a5367 100%);
+#         background-size: 200% 200%;
+#         border: 1px solid rgba(255, 255, 255, 0.16);
+#         border-radius: 16px;
+#         box-shadow: 0 14px 28px rgba(17, 24, 39, 0.24);
+#         box-sizing: border-box;
+#         color: #ffffff;
+#         display: flex;
+#         min-height: 116px;
+#         padding: 0.5rem 2.5rem;
+#         transition: box-shadow 160ms ease, transform 160ms ease;
+#         width: 100%;
+#     }
 
-    @keyframes rag-gradient {
-        0%, 100% {
-            background-position: 0% 50%;
-        }
-        50% {
-            background-position: 100% 50%;
-        }
-    }
+#     @keyframes rag-gradient {
+#         0%, 100% {
+#             background-position: 0% 50%;
+#         }
+#         50% {
+#             background-position: 100% 50%;
+#         }
+#     }
 
-    .rag-banner span {
-        font-size: clamp(2.25rem, 6vw, 4.5rem);
-        font-weight: 800;
-        letter-spacing: -0.04em;
-        line-height: 1;
-    }
+#     .rag-banner span {
+#         font-size: clamp(2.25rem, 6vw, 4.5rem);
+#         font-weight: 800;
+#         letter-spacing: -0.04em;
+#         line-height: 1;
+#     }
 
-    .rag-banner:hover {
-        box-shadow: 0 6px 12px rgba(17, 24, 39, 0.2);
-        transform: translateY(4px);
-    }
+#     .rag-banner:hover {
+#         box-shadow: 0 6px 12px rgba(17, 24, 39, 0.2);
+#         transform: translateY(4px);
+#     }
 
-    .rag-banner:active {
-        box-shadow: 0 3px 6px rgba(17, 24, 39, 0.18);
-        transform: translateY(6px);
-    }
+#     .rag-banner:active {
+#         box-shadow: 0 3px 6px rgba(17, 24, 39, 0.18);
+#         transform: translateY(6px);
+#     }
 
-    @media (prefers-reduced-motion: reduce) {
-        .rag-banner {
-            animation: none;
-            transition: none;
-        }
-    }
-</style>
-""")
+#     @media (prefers-reduced-motion: reduce) {
+#         .rag-banner {
+#             animation: none;
+#             transition: none;
+#         }
+#     }
+# </style>
+# """)
 st.caption("Answers grounded in your documents, with passages you can verify.")
 st.session_state.setdefault("chat_messages", [])
 st.session_state.setdefault("chat_session_id", str(uuid4()))
@@ -90,19 +96,20 @@ with st.sidebar:
         models = get_answer_models(chat, merged["ollama"]["answer_models"], merged["ollama"]["default_answer_model"])
         selected_model = st.selectbox("Answer model", models,
             index=models.index(merged["ollama"]["default_answer_model"]) if merged["ollama"]["default_answer_model"] in models else 0)
-        source_limit = st.slider("Passages to reference", 1, 20, 8)
+        source_limit = st.slider("Passages to reference", 1, 20, 12)
         multi_query = st.toggle("Multi-query retrieval", value=True,
                                help="Explore related wording before retrieving passages. Adds a model call.")
         hybrid = st.toggle("Hybrid retrieval", value=bool(merged["retrieval"].get("hybrid_enabled", True)),
                            help="Combine keyword and semantic matches.")
         chat_sources = st.multiselect(
             "Chat with",
-            options=["Knowledge Base", "Calendar"],
-            default=["Knowledge Base", "Calendar"],
+            options=["Knowledge Base", "Calendar", "Contacts"],
+            default=["Knowledge Base", "Calendar", "Contacts"],
             help="Choose which sources should be searched for this conversation.",
         )
         include_knowledge_base = "Knowledge Base" in chat_sources
         include_calendar = "Calendar" in chat_sources
+        include_contacts = "Contacts" in chat_sources
         render_runtime_details()
 
 messages = st.session_state["chat_messages"]
@@ -166,7 +173,9 @@ if prompt:
                             source_limit=source_limit,
                             hybrid=hybrid,
                             include_calendar=include_calendar,
+                            include_contacts=include_contacts,
                             include_knowledge_base=include_knowledge_base,
+                            history=previous,
                         )
                         status.update(
                             label=f"Found {len(sources)} supporting passages",
@@ -190,7 +199,12 @@ if prompt:
                 answer = "I couldn’t complete this answer. Check the model service on the Health page, then retry."
             answer_slot.markdown(answer)
         render_chat_sources(sources)
-    messages.append({"role": "assistant", "content": answer, "sources": sources, "error": failure})
+    messages.append({
+        "role": "assistant",
+        "content": answer,
+        "sources": sources,
+        "error": failure,
+    })
     database.save_conversation(st.session_state["chat_session_id"], messages)
     try:
         chat.langfuse.flush()

@@ -45,6 +45,9 @@ class ChatRequest(BaseModel):
     source_limit: int = Field(default=8, ge=1, le=50)
     multi_query: bool = True
     hybrid: bool | None = None
+    include_contacts: bool = True
+    include_calendar: bool = True
+    include_knowledge_base: bool = True
     history: list[ChatMessage] = Field(default_factory=list)
 
 
@@ -101,6 +104,10 @@ def create_app(
                 related_questions=related_questions,
                 source_limit=payload.source_limit,
                 hybrid=payload.hybrid,
+                history=history,
+                include_contacts=payload.include_contacts,
+                include_calendar=payload.include_calendar,
+                include_knowledge_base=payload.include_knowledge_base,
             )
             if sources:
                 answer = chat_service.answer(

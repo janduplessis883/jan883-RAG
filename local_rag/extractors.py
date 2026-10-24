@@ -101,12 +101,19 @@ def extract_article(url: str) -> dict:
 def extract_pdf(content: bytes, filename: str) -> dict:
     reader = PdfReader(BytesIO(content))
     pages = [page.extract_text() or "" for page in reader.pages]
-    text = "\n\n".join(page.strip() for page in pages if page.strip())
+    ocr_required_pages = [index for index, page in enumerate(pages, start=1) if not page.strip()]
+    labelled_pages = [f"[Page {index}]\n{page.strip()}" for index, page in enumerate(pages, start=1) if page.strip()]
+    text = "\n\n".join(labelled_pages)
     return {
         "title": Path(filename).stem,
         "text": text.strip(),
         "canonical_uri": None,
-        "metadata": {"filename": filename, "page_count": len(reader.pages)},
+        "metadata": {
+            "filename": filename,
+            "page_count": len(reader.pages),
+            "ocr_required_pages": ocr_required_pages,
+            "has_scanned_pages": bool(ocr_required_pages),
+        },
         "raw_text": text,
     }
 

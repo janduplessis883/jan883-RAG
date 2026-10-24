@@ -278,4 +278,58 @@ def test_import_error_can_retry(runtime, monkeypatch):
     monkeypatch.setattr(runtime[2], 'ingest_text', lambda **kwargs: {'status':'ingested','title':'A document'})
     next(b for b in at.button if b.label == 'Retry failed import').click().run()
     assert not at.exception
-    assert any('Added 1 documents' in w.value for w in at.success)
+    assert any('Added 1 documents' in s.value for s in at.success)
+
+
+def test_reingesting_changed_uri_updates_existing_document(runtime):
+    ingestion = runtime[2]
+    first = ingestion.ingest_text(title="Note", text="old searchable text", canonical_uri="file:///note.md", tags=["work"], source_type="text")
+    second = ingestion.ingest_text(title="Note", text="new searchable text", canonical_uri="file:///note.md", tags=["work"], source_type="text")
+    assert second["status"] == "updated"
+    assert second["source_id"] == first["source_id"]
+    assert runtime[1].get_source(first["source_id"])["full_text"] == "new searchable text"
+
+
+def test_watcher_reconciles_changed_logged_file(tmp_path, runtime, monkeypatch):
+    from watcher import folder_watcher
+    path = tmp_path / "note.md"
+    path.write_text("old text")
+    db = runtime[1]
+    ingestion = runtime[2]
+    monkeypatch.setattr(folder_watcher, "SCANNING_DIRECTORY", tmp_path)
+    first = folder_watcher.ingest_watched_file(path, ingestion, db)
+    path.write_text("new text")
+    second = folder_watcher.ingest_watched_file(path, ingestion, db)
+    assert first["status"] == "ingested"
+    assert second["status"] == "updated"
+
+
+def test_initial_ingestion_rolls_back_source_when_indexing_fails(runtime, monkeypatch):
+    ingestion = runtime[2]
+    monkeypatch.setattr(runtime[1], "replace_chunks", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("index failed")))
+    with pytest.raises(RuntimeError, match="index failed"):
+        ingestion.ingest_text(title="Broken", text="will not be searchable", canonical_uri="file:///broken.md", tags=[])
+    assert runtime[1].find_source_by_uri("file:///broken.md") is None
+
+
+def test_embedding_configuration_is_persisted_and_changed_model_is_rejected(runtime):
+    db = runtime[1]
+    assert db.get_state("embedding_model")
+    settings = runtime[0].read_text(runtime[0].settings_path).replace('embedding_model = "embeddinggemma-300m-4bit"', 'embedding_model = "different-model"')
+    runtime[0].write_text(runtime[0].settings_path, settings)
+    with pytest.raises(ValueError, match="embedding model"):
+        Database(runtime[0]).initialize()
+
+
+def test_pdf_extraction_preserves_page_metadata_and_flags_scans(monkeypatch):
+    from local_rag import extractors
+    class Page:
+        def __init__(self, text): self.text = text
+        def extract_text(self): return self.text
+    class Reader:
+        pages = [Page("page one"), Page("")]
+        def __init__(self, _): pass
+    monkeypatch.setattr(extractors, "PdfReader", Reader)
+    result = extractors.extract_pdf(b"pdf", "scan.pdf")
+    assert result["metadata"]["ocr_required_pages"] == [2]
+    assert "[Page 1]" in result["text"]

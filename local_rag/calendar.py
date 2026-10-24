@@ -121,23 +121,48 @@ class NotionCalendarService:
     def sync(self, *, full_sync: bool = False, now: datetime | None = None,
              progress_callback: Callable[[int, int, str], None] | None = None) -> dict:
         now = now or datetime.now().astimezone()
-        cutoff = now - timedelta(days=28)
         pages = self.fetch_all_pages()
         seen_ids = set()
-        upserted = skipped = deleted = errors = 0
+        existing_events = {row["notion_page_id"]: row for row in self.database.list_calendar_events()}
+        upserted = skipped = unchanged = deleted = errors = 0
         error_details = []
-        candidates = [page for page in pages if CalendarEvent.from_notion_page(page) is not None]
-        total = len(candidates)
-        for index, page in enumerate(candidates, 1):
+        # Full syncs are deliberately bounded to recent events. We still add every
+        # dated page to seen_ids so older local events are retained and deletions
+        # remain detectable from the complete page listing.
+        cutoff_days = 30 if full_sync else 28
+        candidates = []
+        for page in pages:
             event = CalendarEvent.from_notion_page(page)
+            if event is None:
+                continue
             seen_ids.add(event.page_id)
             start = datetime.fromisoformat(event.start_date.replace("Z", "+00:00"))
             if start.tzinfo is None:
                 start = start.replace(tzinfo=now.tzinfo)
-            if not full_sync and start < cutoff:
+            if start < now - timedelta(days=cutoff_days):
                 skipped += 1
                 continue
+            candidates.append(page)
+        total = len(candidates)
+        if progress_callback:
+            progress_callback(0, total, "Starting calendar sync")
+        for index, page in enumerate(candidates, 1):
+            event = CalendarEvent.from_notion_page(page)
+            if progress_callback:
+                progress_callback(index - 1, total, f"Processing {event.event or event.page_id}")
             try:
+                existing = existing_events.get(event.page_id)
+                if (
+                    not full_sync
+                    and existing
+                    and event.last_edited_time
+                    and existing.get("last_edited_time") == event.last_edited_time
+                    and self.database.get_source(int(existing["source_id"]))
+                ):
+                    unchanged += 1
+                    if progress_callback:
+                        progress_callback(index, total, event.event or event.page_id)
+                    continue
                 self._upsert_event(event)
                 upserted += 1
             except Exception as exc:
@@ -145,6 +170,8 @@ class NotionCalendarService:
                 error_details.append({"page_id": event.page_id, "event": event.event, "error": str(exc)})
             if progress_callback:
                 progress_callback(index, total, event.event or event.page_id)
+        if progress_callback:
+            progress_callback(total, total, "Finishing calendar sync: checking removed events")
         for row in self.database.calendar_page_ids():
             if row not in seen_ids:
                 try:
@@ -154,7 +181,8 @@ class NotionCalendarService:
                     errors += 1
                     error_details.append({"page_id": row, "operation": "delete", "error": str(exc)})
         return {"status": "ok", "page_count": len(pages), "upserted": upserted, "skipped": skipped,
-                "deleted": deleted, "errors": errors, "error_details": error_details[:50]}
+                "unchanged": unchanged, "deleted": deleted, "errors": errors,
+                "error_details": error_details[:50]}
 
     def _upsert_event(self, event: CalendarEvent) -> None:
         text = event.embedding_text()
@@ -165,8 +193,10 @@ class NotionCalendarService:
         metadata = {"notion_page_id": event.page_id, "notion_data_source_id": self.data_source_id, "calendar": True}
         if existing:
             source_id = int(existing["id"])
-            if existing["content_hash"] != self.database.hash_text(text):
-                self.ingestion.update_source(source_id, title=event.event, text=text, tags=event.tags)
+            if existing["full_text"] != text:
+                self.ingestion.update_source(source_id, title=event.event or "Calendar event", text=text, tags=event.tags)
+            else:
+                self.database.update_source_tags(source_id, event.tags)
             current = self.database.get_source(source_id) or {}
             metadata = {**current.get("metadata", {}), **metadata}
             self.database.update_source_metadata(source_id, metadata)

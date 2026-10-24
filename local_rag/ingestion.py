@@ -19,6 +19,15 @@ from local_rag.extractors import (
     sha256_text,
 )
 from local_rag.telegram_sync import TelegramBotClient
+from local_rag.summary_service import SummaryService
+
+
+def _document_hash(text: str, source_type: str, canonical_uri: str | None,
+                   allow_duplicate_content: bool = False) -> str:
+    clean_text = text.strip()
+    if allow_duplicate_content and canonical_uri:
+        return sha256_text(f"source:{source_type}\0uri:{canonical_uri}\0text:{clean_text}")
+    return sha256_text(clean_text)
 
 
 class IngestionService:
@@ -32,6 +41,7 @@ class IngestionService:
         self.config = config_manager.load_merged()
         self.chunker = SemanticChunker(self.config["chunking"])
         self.ollama = OllamaClient(self.config["ollama"])
+        self.summary_service = SummaryService(config_manager, database, self.ollama)
         self.raw_dir = self.config_manager.resolve_path(self.config["app"]["raw_files_dir"])
         self.raw_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +159,7 @@ class IngestionService:
         ingested = 0
         duplicates = 0
         errors = 0
+        skipped = 0
 
         for index, row in enumerate(preview["records"], start=1):
             page_id = row.get("notion_page_id")
@@ -197,11 +208,23 @@ class IngestionService:
                             "canonical_uri": existing["canonical_uri"],
                             "tags": existing_tags,
                             "skipped_content_fetch": True,
+                            "notion_row": row,
                         }
                     )
                     continue
 
                 page_preview = self.preview_notion_page(page_id)
+                if not page_preview["text"].strip():
+                    # Blank Notion rows have nothing to embed. Keep them eligible
+                    # for future syncs instead of marking them as ingested.
+                    skipped += 1
+                    results.append({
+                        "status": "skipped", "reason": "empty_content",
+                        "notion_page_id": self._normalize_notion_id(str(page_id)),
+                        "title": page_preview["title"],
+                        "message": "Page has no text to ingest; will check again next sync.",
+                    })
+                    continue
                 merged_metadata = dict(page_preview["metadata"])
                 merged_metadata["notion_data_source_id"] = preview["data_source_id"]
                 merged_metadata["notion_row"] = row
@@ -219,6 +242,7 @@ class IngestionService:
                     chunking=chunking,
                 )
                 result["notion_page_id"] = self._normalize_notion_id(str(page_id))
+                result["notion_row"] = row
                 results.append(result)
                 if result["status"] == "duplicate":
                     duplicates += 1
@@ -238,6 +262,7 @@ class IngestionService:
             "page_count": total,
             "ingested": ingested,
             "duplicates": duplicates,
+            "skipped": skipped,
             "errors": errors,
             "items": results,
         }
@@ -701,10 +726,24 @@ class IngestionService:
         if not clean_text:
             raise ValueError("Extracted content is empty.")
 
-        content_hash = sha256_text(clean_text + (f"\n{canonical_uri}" if allow_duplicate_content and canonical_uri else ""))
+        content_hash = _document_hash(clean_text, source_type, canonical_uri, allow_duplicate_content)
         duplicate = self.database.find_source_by_uri(canonical_uri) if allow_duplicate_content else self.database.find_duplicate(canonical_uri, content_hash)
         if duplicate:
             existing_source = self.database.get_source(int(duplicate["id"]))
+            if existing_source and canonical_uri and not existing_source.get("deleted_at") and existing_source.get("content_hash") != content_hash:
+                refreshed = self.update_source(
+                    int(duplicate["id"]),
+                    title=title,
+                    text=clean_text,
+                    tags=tags if tags is not None else existing_source.get("tags", []),
+                )
+                raw_path = existing_source.get("raw_text_path")
+                if raw_path:
+                    Path(raw_path).write_text(raw_text, encoding="utf-8")
+                binary_path = existing_source.get("raw_binary_path")
+                if binary_path and raw_binary is not None:
+                    Path(binary_path).write_bytes(raw_binary)
+                return {**refreshed, "canonical_uri": canonical_uri}
             if existing_source and existing_source["deleted_at"]:
                 self.database.set_source_removed(int(duplicate["id"]), False)
                 refreshed = self.update_source(
@@ -788,6 +827,7 @@ class IngestionService:
 
         embeddings = self.ollama.embed_texts([chunk.text for chunk in chunks])
         stored_metadata = dict(metadata)
+        stored_metadata["allow_duplicate_content"] = allow_duplicate_content
         stored_metadata["chunking"] = {
             "strategy": strategy,
             **(
@@ -805,22 +845,29 @@ class IngestionService:
             "rejected_chunk_count": rejected_chunk_count,
         }
 
-        source_id = self.database.insert_source(
-            source_type=source_type,
-            title=title,
-            canonical_uri=canonical_uri,
-            external_ref=external_ref,
-            content_hash=content_hash,
-            summary=clean_text[:280],
-            full_text=clean_text,
-            tags=suggested_tags,
-            metadata=stored_metadata,
-            raw_text_path=str(raw_text_path),
-            raw_binary_path=str(raw_binary_path) if raw_binary_path else None,
-        )
-        self.database.replace_chunks(source_id, chunks, embeddings)
+        try:
+            with self.database.connection:
+                source_id = self.database.insert_source(
+                    source_type=source_type,
+                    title=title,
+                    canonical_uri=canonical_uri,
+                    external_ref=external_ref,
+                    content_hash=content_hash,
+                    summary=clean_text[:280],
+                    full_text=clean_text,
+                    tags=suggested_tags,
+                    metadata=stored_metadata,
+                    raw_text_path=str(raw_text_path),
+                    raw_binary_path=str(raw_binary_path) if raw_binary_path else None,
+                    commit=False,
+                )
+                self.database.replace_chunks(source_id, chunks, embeddings, commit=False)
+        except Exception:
+            import shutil
+            shutil.rmtree(source_dir, ignore_errors=True)
+            raise
 
-        return {
+        result = {
             "status": "ingested",
             "source_id": source_id,
             "title": title,
@@ -828,6 +875,12 @@ class IngestionService:
             "tags": suggested_tags,
             "canonical_uri": canonical_uri,
         }
+        summary_result = self.summary_service.process(
+            source_id=source_id, source_type=source_type, title=title,
+            text=clean_text, canonical_uri=canonical_uri,
+        )
+        result["summary_email"] = summary_result
+        return result
 
     def suggest_tags(self, *, title: str, text: str) -> list[str]:
         """Suggest concise retrieval tags from the beginning of a document.
@@ -887,6 +940,10 @@ class IngestionService:
         if not chunks:
             raise ValueError("The document did not produce any searchable passages.")
         embeddings = self.ollama.embed_texts([chunk.text for chunk in chunks])
+        content_hash = _document_hash(
+            text, source["source_type"], source.get("canonical_uri"),
+            source["metadata"].get("allow_duplicate_content", False) or source["source_type"] == "notion_calendar",
+        )
         self.database.update_document(source_id, title=title.strip(), text=text.strip(), tags=tags,
-                                      content_hash=sha256_text(text.strip()), chunks=chunks, embeddings=embeddings)
+                                      content_hash=content_hash, chunks=chunks, embeddings=embeddings)
         return {"status": "updated", "source_id": source_id, "title": title.strip(), "chunk_count": len(chunks)}

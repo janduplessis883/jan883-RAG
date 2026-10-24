@@ -42,6 +42,10 @@ dedupe_by_source = true
 rrf_k = 60
 expand_radius = 1
 
+[system_one]
+enabled = true
+timeout_seconds = 120
+
 [langfuse]
 base_url = "http://localhost:3000"
 capture_content = false
@@ -58,6 +62,10 @@ request_timeout_seconds = 30
 data_source_preview_limit = 200
 max_child_page_depth = 3
 sync_interval_minutes = 60
+contacts_data_source_id = ""
+
+[summary]
+max_input_chars = 60000
 """
 
 DEFAULT_SECRETS = """[telegram]
@@ -100,6 +108,15 @@ class ConfigManager:
         # shape used by the rest of the application. These values override the
         # local config/secrets.toml values when both are present.
         streamlit_secrets = self.load_toml(self.root_dir / ".streamlit" / "secrets.toml")
+        system_one_overrides = {
+            "base_url": streamlit_secrets.get("TYPESAFE_BASE_URL"),
+            "api_key": streamlit_secrets.get("TYPESAFE_API_KEY"),
+            "default_model": streamlit_secrets.get("TYPESAFE_DEFAULT_MODEL"),
+        }
+        merged["system_one"] = self._deep_merge(
+            merged.get("system_one", {}),
+            {key: value for key, value in system_one_overrides.items() if value},
+        )
         langfuse = streamlit_secrets.get("langfuse", {})
         langfuse_overrides = {
             "public_key": streamlit_secrets.get("LANGFUSE_PUBLIC_KEY", langfuse.get("public_key")),
@@ -112,6 +129,10 @@ class ConfigManager:
         merged["langfuse"] = self._deep_merge(
             merged.get("langfuse", {}),
             {key: value for key, value in langfuse_overrides.items() if value},
+        )
+        resend_key = streamlit_secrets.get("RESEND_API_KEY") or streamlit_secrets.get("resend", {}).get("api_key")
+        merged["resend"] = self._deep_merge(
+            merged.get("resend", {}), {"api_key": resend_key} if resend_key else {}
         )
         return merged
 

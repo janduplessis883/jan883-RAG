@@ -27,12 +27,18 @@ def get_runtime():
 
 def main() -> None:
     st.set_page_config(page_title="Personal Local RAG", page_icon=":material/menu_book:", layout="wide")
-    if "runtime" not in st.session_state:
+    runtime_state = st.session_state.get("runtime")
+    if (
+        not runtime_state
+        or not hasattr(runtime_state[1], "list_contacts")
+        or not hasattr(runtime_state[2], "summary_service")
+    ):
         st.session_state["runtime"] = get_runtime()
 
     page = st.navigation(
         [
             st.Page("app_pages/chat.py", title="Chat", icon=":material/chat:", default=True),
+            st.Page("app_pages/contacts.py", title="Contacts", icon=":material/contacts:"),
             st.Page("app_pages/library.py", title="Library", icon=":material/library_books:"),
             st.Page("app_pages/ingest.py", title="Ingest", icon=":material/download:"),
             st.Page("app_pages/search.py", title="Search", icon=":material/search:"),

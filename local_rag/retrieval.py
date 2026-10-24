@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from local_rag.embeddings import OllamaClient
 
 
@@ -16,6 +18,7 @@ class SearchService:
         self.database = database
         self.config = config_manager.load_merged()
         self.ollama = OllamaClient(self.config["ollama"])
+        self.last_latency_ms = 0.0
 
     def _setting(self, key: str, default):
         # Defaults keep pre-existing settings.toml files working.
@@ -45,11 +48,17 @@ class SearchService:
         multi-query fusion can operate on the full ranked list and only dedupe
         at the very end.
         """
-        use_hybrid = self._setting("hybrid_enabled", True) if hybrid is None else hybrid
-        return self._hybrid_pool(query, source_ids) if use_hybrid else self._dense_pool(query, source_ids)
+        started = time.perf_counter()
+        try:
+            use_hybrid = self._setting("hybrid_enabled", True) if hybrid is None else hybrid
+            return self._hybrid_pool(query, source_ids) if use_hybrid else self._dense_pool(query, source_ids)
+        finally:
+            self.last_latency_ms = (time.perf_counter() - started) * 1000
 
     def finish_results(self, records: list[dict], *, limit: int, dedupe_by_source: bool) -> list[dict]:
         """Order fused records, dedupe by source, truncate, expand context."""
+        if limit <= 0:
+            return []
         ordered = sorted(records, key=lambda record: record["rrf_score"], reverse=True)
         selected: list[dict] = []
         seen_sources: set[int] = set()
@@ -66,6 +75,14 @@ class SearchService:
         for record in selected:
             if record.get("source_id") in calendar:
                 record["calendar_event"] = calendar[record["source_id"]]
+        from local_rag.contacts import hydrate_contacts
+        contacts = {item['source_id']: item for item in hydrate_contacts(
+            self.config_manager, self.database,
+            self.database.list_contacts(source_ids=list(seen_sources)),
+        )}
+        for record in selected:
+            if record['source_id'] in contacts:
+                record['contact'] = contacts[record['source_id']]
         return selected
 
     def expand_context(self, results: list[dict]) -> list[dict]:

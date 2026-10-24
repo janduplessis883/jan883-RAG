@@ -11,6 +11,12 @@ PREFILLED_MARKDOWN_DIRECTORIES = [
 
 
 def runtime():
+    if "runtime" not in st.session_state:
+        # Pages can be executed directly by Streamlit (and by AppTest) without
+        # the root navigation script having initialized the shared services.
+        from app import get_runtime
+
+        st.session_state["runtime"] = get_runtime()
     return st.session_state["runtime"]
 
 
@@ -18,7 +24,7 @@ def source_link(canonical_uri: str) -> str:
     match = re.fullmatch(r"notion://page/([0-9a-fA-F-]+)", canonical_uri)
     if match:
         return f"https://app.notion.com/p/{match.group(1).replace('-', '')}?source=copy_link"
-    match = re.fullmatch(r"notion://calendar/([0-9a-fA-F-]+)", canonical_uri or "")
+    match = re.fullmatch(r"notion://(?:calendar|contact)/([0-9a-fA-F-]+)", canonical_uri or "")
     return f"https://app.notion.com/p/{match.group(1).replace('-', '')}?source=copy_link" if match else canonical_uri
 
 
@@ -60,6 +66,8 @@ def _tag_badge_color(tag: str) -> str:
 
 
 def display_source_title(item) -> str:
+    if item.get("contact"):
+        return "Contact - " + item["contact"]["name"]
     calendar_event = item.get("calendar_event")
     if calendar_event:
         return f"Calendar - {calendar_event.get('event') or item.get('title', 'Event')}"
@@ -72,6 +80,15 @@ def render_source_content(item, *, markdown=False, tags_as_badges=False):
     if calendar_event:
         end = calendar_event.get("end_date") or "not specified"
         st.caption(f"Start: {calendar_event.get('start_date', 'not specified')} · End: {end}")
+    contact = item.get("contact")
+    if contact:
+        for label, field in (("Telephone", "tel"), ("Email", "email"), ("Address", "address")):
+            st.write(f"{label}: {contact.get(field) or 'Not specified'}")
+        if contact.get("url", "").startswith(("https://", "http://")):
+            st.link_button("Website", contact["url"], icon=":material/language:")
+        for attachment in contact.get("attachments", []):
+            label = attachment["name"] + (" (open in Notion)" if attachment.get("open_in_notion") else "")
+            st.link_button(label, attachment["url"], icon=":material/attach_file:")
     uri = item.get("canonical_uri")
     if uri and source_link(uri).startswith(("https://", "http://")):
         st.link_button("Open original", source_link(uri), icon=":material/open_in_new:")
@@ -114,6 +131,31 @@ def render_chat_sources(sources):
             with st.popover(f"[S{index}] {title[:45]}"):
                 st.markdown(f"**{title}**")
                 render_source_content(item, markdown=True, tags_as_badges=True)
+
+
+def render_system_one_assessment(assessment):
+    if not assessment:
+        return
+    labels = {
+        "supported": "Supported",
+        "partially_supported": "Partially supported",
+        "unsupported": "Unsupported",
+    }
+    level = assessment.get("support_level", "unknown")
+    probability = assessment.get("direct_support_probability")
+    score = assessment.get("evidence_quality")
+    with st.expander("Nimble evidence assessment", icon=":material/fact_check:"):
+        st.write(f"**Evidence verdict:** {labels.get(level, str(level).replace('_', ' ').title())}")
+        if probability is not None:
+            st.write(f"**Direct support probability:** {probability:.2f}")
+        if score is not None:
+            maximum = assessment.get("evidence_quality_max", 3)
+            st.write(f"**Evidence quality:** {score:.2f} / {maximum:.2f}")
+            st.caption("Expected score across the ordered rubric: Poor (0), Limited (1), Good (2), Strong (3).")
+        if assessment.get("raw_output") is not None:
+            st.markdown("**Nimble output JSON**")
+            st.json(assessment["raw_output"])
+        st.caption("A local model assessment of the cited passages, not a replacement for checking the sources.")
 
 
 def render_chunking_controls(key_prefix: str, config: dict) -> dict:

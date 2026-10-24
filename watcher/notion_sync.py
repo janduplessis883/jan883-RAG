@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import fcntl
+import json
 import sys
 import time
 
@@ -22,6 +23,7 @@ from local_rag.config import ConfigManager
 from local_rag.database import Database
 from local_rag.ingestion import IngestionService
 from local_rag.calendar import NotionCalendarService
+from local_rag.contacts import NotionContactsService
 
 
 NOTION_DATA_SOURCE_ID = "f07c5456-62e7-4589-848d-d87fca9a483c"
@@ -29,6 +31,25 @@ SYNC_INTERVAL_SECONDS = 60 * 60
 LOG_FILE = PROJECT_ROOT / "logs/notion-sync.log"
 SYNC_TAGS = ["email", "work"]
 NOTION_API_BASE = "https://api.notion.com/v1"
+
+
+def _already_marked(item: dict, tags: list[str]) -> bool:
+    """Skip a Notion write when the data-source row already has the desired state."""
+    row = item.get("notion_row") or {}
+    ingested = row.get("Ingested", row.get("ingested"))
+    if isinstance(ingested, dict):
+        ingested = ingested.get("checkbox")
+    current_tags = row.get("Tags", row.get("tags"))
+    if isinstance(current_tags, str):
+        try:
+            current_tags = json.loads(current_tags)
+        except json.JSONDecodeError:
+            current_tags = None
+    if isinstance(current_tags, dict):
+        current_tags = current_tags.get("multi_select")
+    if isinstance(current_tags, list):
+        current_tags = [tag.get("name") if isinstance(tag, dict) else tag for tag in current_tags]
+    return ingested is True and isinstance(current_tags, list) and set(tags) == set(current_tags)
 
 
 def configure_logging() -> None:
@@ -48,11 +69,16 @@ def configure_logging() -> None:
 def sync_once(ingestion: IngestionService) -> dict:
     """Ingest pages and mark successful/known pages as ingested in Notion."""
 
-    result = ingestion.ingest_notion_data_source(
-        data_source_id=NOTION_DATA_SOURCE_ID,
-    )
-    calendar_result = sync_calendar_once(ingestion.config_manager, ingestion.database, ingestion)
-    result["calendar"] = calendar_result
+    # Contacts sync independently: an unavailable email/calendar source cannot block it.
+    try:
+        contacts_result = sync_contacts_once(ingestion.config_manager, ingestion.database, ingestion)
+    except Exception as exc:
+        contacts_result = {"status": "error", "errors": 1, "error": str(exc)}
+        ingestion.database.record_operation("sync:notion_contacts", contacts_result)
+    result = ingestion.ingest_notion_data_source(data_source_id=NOTION_DATA_SOURCE_ID)
+    result["calendar"] = sync_calendar_once(ingestion.config_manager, ingestion.database, ingestion)
+    result["contacts"] = contacts_result
+    result["errors"] = result.get("errors", 0) + contacts_result.get("errors", 0)
 
     notion = NotionHelper(
         notion_token=ingestion.config["notion"]["api_token"],
@@ -78,6 +104,8 @@ def sync_once(ingestion: IngestionService) -> dict:
                 existing = ingestion.database.get_source(int(item["source_id"]))
                 source_tags = list(existing.get("tags", [])) if existing else source_tags
             tags = list(dict.fromkeys([*SYNC_TAGS, *source_tags]))
+            if _already_marked(item, tags):
+                continue
             if item.get("status") == "ingested" and item.get("source_id"):
                 ingestion.database.update_source_tags(int(item["source_id"]), tags)
             notion._make_request(  # noqa: SLF001 - page-property update is not exposed publicly
@@ -123,6 +151,20 @@ def sync_calendar_once(config_manager, database, ingestion, *, full_sync=False, 
         return result
 
 
+def sync_contacts_once(config_manager, database, ingestion, *, full_sync=False, progress_callback=None) -> dict:
+    lock_path = config_manager.resolve_path(config_manager.load_merged()["app"]["data_dir"]) / "notion_contacts_sync.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"status": "skipped", "message": "Another contacts sync is already running."}
+        service = NotionContactsService(config_manager, database, ingestion)
+        result = service.sync(full_sync=full_sync, progress_callback=progress_callback)
+        database.record_operation("sync:notion_contacts", result)
+        return result
+
+
 def _sync_interval_seconds(config_manager) -> int:
     minutes = int(config_manager.load_merged().get("notion", {}).get("sync_interval_minutes", 60))
     return max(minutes, 1) * 60
@@ -163,20 +205,32 @@ def run_sync() -> None:
                 sync_interval_seconds = _sync_interval_seconds(config)
                 logger.info(
                     "Sync completed: ingested={ingested} duplicates={duplicates} "
-                    "errors={errors} notion_updates={notion_updates} pages={pages}",
+                    "skipped={skipped} errors={errors} notion_updates={notion_updates} pages={pages}",
                     ingested=result.get("ingested", 0),
                     duplicates=result.get("duplicates", 0),
+                    skipped=result.get("skipped", 0),
                     errors=result.get("errors", 0),
                     notion_updates=result.get("notion_updates", 0),
                     pages=result.get("page_count", 0),
                 )
                 calendar_result = result.get("calendar", {})
+                logger.info(
+                    "Calendar sync: status={status} upserted={upserted} unchanged={unchanged} errors={errors}",
+                    status=calendar_result.get("status"), upserted=calendar_result.get("upserted", 0),
+                    unchanged=calendar_result.get("unchanged", 0), errors=calendar_result.get("errors", 0),
+                )
+                contacts_result = result.get("contacts", {})
+                logger.info("Contacts sync: {result}", result=contacts_result)
+                item_errors = [item for item in result.get("items", []) if item.get("status") == "error"]
+                if item_errors:
+                    logger.error("Notion item failures: {errors}", errors=item_errors)
                 if calendar_result.get("error_details"):
                     logger.error("Calendar item failures: {errors}", errors=calendar_result["error_details"])
                 console.print(
                     f"[green]SYNC COMPLETE[/green] "
                     f"{result.get('ingested', 0)} ingested, "
                     f"{result.get('duplicates', 0)} already present, "
+                    f"{result.get('skipped', 0)} skipped, "
                     f"{result.get('notion_updates', 0)} marked in Notion, "
                     f"{result.get('errors', 0)} errors"
                 )

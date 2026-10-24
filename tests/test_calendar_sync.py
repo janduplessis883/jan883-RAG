@@ -107,3 +107,60 @@ def test_calendar_events_with_identical_text_keep_distinct_sources(tmp_path):
     result = service.sync(now=datetime(2026, 9, 10, tzinfo=timezone.utc))
     assert result["errors"] == 0
     assert len({row["source_id"] for row in db.list_calendar_events()}) == 2
+
+
+def test_calendar_sync_skips_unchanged_events_but_full_sync_reprocesses(tmp_path, monkeypatch):
+    class Config:
+        def load_merged(self):
+            return {"app": {"database_path": str(tmp_path / "rag.sqlite3")}, "ollama": {"embedding_dimensions": 3}, "chunking": {}, "notion": {}}
+        def resolve_path(self, value):
+            from pathlib import Path
+            return Path(value)
+
+    from local_rag.database import Database
+
+    db = Database(Config())
+    db.initialize()
+    class FakeIngestion:
+        def __init__(self):
+            self.calls = 0
+
+        def ingest_text(self, **kwargs):
+            self.calls += 1
+            source_id = db.insert_source(source_type=kwargs["source_type"], title=kwargs["title"], canonical_uri=kwargs["canonical_uri"],
+                external_ref=kwargs["external_ref"], content_hash=db.hash_text(kwargs["text"] + kwargs["canonical_uri"]), summary=kwargs["text"], full_text=kwargs["text"],
+                tags=kwargs["tags"], metadata=kwargs["metadata"], raw_text_path=None, raw_binary_path=None)
+            return {"source_id": source_id}
+
+        def update_source(self, source_id, **kwargs):
+            return None
+
+    ingestion = FakeIngestion()
+    service = NotionCalendarService(Config(), db, ingestion)
+    monkeypatch.setattr(service, "_write_rag_id", lambda event, rag_id: None)
+    page = {"id": "25a73f97-6d2f-4d6f-99ac-ec5ae2454f5c", "last_edited_time": "2026-09-10T08:00:00Z", "properties": {
+        "Event": {"type": "title", "title": [{"plain_text": "Keep"}]},
+        "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Details"}]},
+        "Date": {"type": "date", "date": {"start": "2026-09-10", "end": None, "time_zone": None}},
+    }}
+    old_page = {"id": "35a73f97-6d2f-4d6f-99ac-ec5ae2454f5c", "last_edited_time": "2026-09-10T08:00:00Z", "properties": {
+        "Event": {"type": "title", "title": [{"plain_text": "Old event"}]},
+        "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Old details"}]},
+        "Date": {"type": "date", "date": {"start": "2026-07-01", "end": None, "time_zone": None}},
+    }}
+    monkeypatch.setattr(service, "fetch_all_pages", lambda: [page, old_page])
+
+    first = service.sync(now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    second = service.sync(now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    progress = []
+    full = service.sync(full_sync=True, now=datetime(2026, 9, 10, tzinfo=timezone.utc),
+                        progress_callback=lambda completed, total, label: progress.append((completed, total, label)))
+
+    assert first["upserted"] == 1
+    assert second["upserted"] == 0
+    assert second["unchanged"] == 1
+    assert full["upserted"] == 1
+    assert full["skipped"] == 1
+    assert progress[0][0:2] == (0, 1)
+    assert progress[-1][0:2] == (1, 1)
+    assert ingestion.calls == 1

@@ -35,6 +35,10 @@ dedupe_by_source = true
 rrf_k = 60
 expand_radius = 1
 
+[system_one]
+enabled = true
+timeout_seconds = 120
+
 [langfuse]
 base_url = "http://localhost:3000"
 capture_content = false
@@ -51,4 +55,5 @@ request_timeout_seconds = 30
 data_source_preview_limit = 200
 max_child_page_depth = 3
 calendar_data_source_id = "303fdfd6-8a97-80f6-bbcc-000b5fe219ab"
-sync_interval_minutes = 5
+contacts_data_source_id = "202fdfd6-8a97-81dd-9a7b-000b08218e12"
+sync_interval_minutes = 180

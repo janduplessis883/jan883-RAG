@@ -61,6 +61,30 @@ curl -X POST http://127.0.0.1:8000/search \
   -d '{"query":"What decisions were made?","limit":5}'
 ```
 
+## Local Nimble evidence assessment
+
+The Chat page can optionally ask a local TypeSafe System One model to assess
+whether retrieved passages support the generated answer. The assessment uses
+the question, draft answer, and retrieved passage text, and is shown with the
+answer and citations. It does not replace retrieval or the answer model.
+
+Install the project dependencies and add the TypeSafe settings to
+`.streamlit/secrets.toml`:
+
+```toml
+TYPESAFE_BASE_URL = "http://localhost:11434"
+TYPESAFE_API_KEY = "ollama"
+TYPESAFE_DEFAULT_MODEL = "nimble"
+```
+
+Run `pip install -e .` if you have not installed the project dependencies yet.
+The Chat page reads these settings when it calls the SDK; shell environment
+variables remain a fallback. In the Chat page's **Advanced settings**, enable
+**Nimble evidence assessment**. It is enabled by default in
+`config/settings.toml`; turn it off there or in the chat sidebar to skip the
+additional local model request. If Nimble is unavailable, the RAG answer is
+still shown and the assessment is marked unavailable.
+
 ## Notes
 
 - Hybrid retrieval is enabled by default and can be disabled in the Chat sidebar with **Hybrid retrieval (FTS5 + dense)**, or via `retrieval.hybrid_enabled` in `config/settings.toml`.
@@ -149,3 +173,42 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.janduplessis.jan883-
 
 Its Loguru log is `logs/notion-sync.log`; LaunchAgent stdout and stderr are
 `logs/notion-sync.stdout.log` and `logs/notion-sync.stderr.log`.
+
+## Notion contacts
+
+Contacts use the same local SQLite and vector index as the calendar. Configure
+`notion.contacts_data_source_id` in `config/settings.toml` and use the existing
+Notion token. This workspace is configured for data source
+`202fdfd6-8a97-81dd-9a7b-000b08218e12`.
+
+The integration reads **Name / Company**, **Address** (Place or text),
+**Description**, **Email**, **Files & media**, **Tel**, and **URL**. Each contact
+has a source-linked structured record. Name, address and description are embedded;
+exact email, telephone and attachment details are read from the structured record.
+Telephone search normalizes punctuation, international prefixes and UK local forms,
+while answers preserve the original display number. Empty fields remain empty.
+
+Use **Contacts** in the Chat page's **Chat with** selector. It can be selected
+alone or with Knowledge Base and Calendar. Example questions:
+
+- “What is Sarah's telephone number?”
+- “Who owns 020 7946 0123?”
+- “Who do I know who specialises in kitchen renovations?”
+- “List all contacts without an email address.”
+
+The **Contacts** page provides a directory and missing-field filters. **Sync
+contacts** is available there and in Admin. A one-off sync is also available with
+`python -m local_rag.cli sync-contacts`. The existing Notion worker includes
+contacts in its configured sync cycle; restart a previously running worker once
+to load the new code.
+
+All contacts are synced, with no date cutoff. Page IDs preserve identity across
+renames; identical descriptions do not merge separate contacts. Changes to contact
+details update the structured record, and only changes to embedding text require
+new embeddings. Removed contacts are excluded from search after a complete,
+successful listing; failed or malformed scans retain the previous records.
+
+Attachments are **links only**: no downloads, OCR, or attachment content embeddings.
+Notion-hosted URLs are refreshed when they expire. If refreshing is unavailable,
+the link opens the owning Notion page and is labelled accordingly. Website URLs
+are stored without crawling. Notion contact properties are never written back.

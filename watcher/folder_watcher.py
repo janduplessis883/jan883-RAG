@@ -94,17 +94,11 @@ def ingest_watched_file(path: Path, ingestion: IngestionService, database: Datab
         return {"status": "ignored", "reason": "unsupported_extension", "file_path": str(path)}
 
     file_path = str(path)
-    logged = database.get_ingestion_log_entry(file_path)
-    if logged and logged["status"] in {"ingested", "duplicate"}:
-        return {
-            "status": "skipped_logged",
-            "file_path": file_path,
-            "source_id": logged["source_id"],
-            "message": logged["message"],
-        }
-
     content = wait_for_stable_file(path)
     content_hash = hashlib.sha256(content).hexdigest()
+    logged = database.get_ingestion_log_entry(file_path)
+    if logged and logged["status"] in {"ingested", "duplicate", "updated"} and logged["content_hash"] == content_hash:
+        return {"status": "skipped_logged", "file_path": file_path, "source_id": logged["source_id"], "message": logged["message"]}
     source_tags = tags_for_file(path)
     try:
         result = ingestion.ingest_file(
@@ -149,6 +143,18 @@ def ingest_watched_file(path: Path, ingestion: IngestionService, database: Datab
         raise
 
 
+def reconcile_folder(folder: Path, ingestion: IngestionService, database: Database) -> list[dict]:
+    """Ingest supported files already present when the watcher starts."""
+    results = []
+    for path in sorted(folder.rglob("*")):
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            try:
+                results.append(ingest_watched_file(path, ingestion, database))
+            except Exception as exc:  # keep reconciling remaining files
+                results.append({"status": "error", "file_path": str(path), "error": str(exc)})
+    return results
+
+
 def run_watcher() -> None:
     """Watch the configured OneDrive folder until interrupted."""
 
@@ -166,6 +172,8 @@ def run_watcher() -> None:
     database = Database(config)
     database.initialize()
     ingestion = IngestionService(config, database)
+
+    reconcile_folder(folder, ingestion, database)
 
     console.print(
         Panel.fit(

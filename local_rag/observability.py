@@ -14,6 +14,9 @@ class LangfuseObserver:
         self.last_trace_url: str | None = None
         self.client = None
 
+        if os.getenv("LANGFUSE_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return
+
         public_key = os.getenv("LANGFUSE_PUBLIC_KEY", settings.get("public_key", ""))
         secret_key = os.getenv("LANGFUSE_SECRET_KEY", settings.get("secret_key", ""))
         base_url = os.getenv(

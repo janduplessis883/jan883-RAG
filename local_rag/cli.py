@@ -20,7 +20,7 @@ def build_runtime(root_dir: Path):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Personal local RAG maintenance CLI")
-    parser.add_argument("command", choices=["init", "stats", "sync-telegram", "backup", "reindex"])
+    parser.add_argument("command", choices=["init", "stats", "sync-telegram", "sync-contacts", "backup", "reindex"])
     args = parser.parse_args()
 
     root_dir = Path(__file__).resolve().parent.parent
@@ -35,6 +35,10 @@ def main() -> None:
 
         ingestion = IngestionService(config, database)
         print(json.dumps(ingestion.sync_telegram(), indent=2))
+    elif args.command == "sync-contacts":
+        from local_rag.ingestion import IngestionService
+        from watcher.notion_sync import sync_contacts_once
+        print(json.dumps(sync_contacts_once(config, database, IngestionService(config, database)), indent=2))
     elif args.command == "backup":
         print(json.dumps(backup.run_backup(), indent=2))
     elif args.command == "reindex":
